@@ -506,8 +506,8 @@ STEPS_DEFAULT = [
 #   CCW: final arc 21.0 cm -> heading  0.0 deg, base_link 34.5 cm to the outer wall
 STEPS_CW_OUTER  = [
     0.0,  0.0,
-     100.0,   6.0,
-    -100.0,  -4.5,
+     100.0,   7.0,
+    -100.0,  -3.5,
      100.0,   9.6,
      0.0, 5.0,
     -100.0, 21.0,
@@ -516,8 +516,8 @@ STEPS_CW_OUTER  = [
 
 STEPS_CW_INNER = [
     0.0,  0.0,
-     100.0,   7.5,
-    -100.0,  -4.5,
+     100.0,   7.0,
+    -100.0,  -3.5,
      100.0,   11.0,
      0.0, 47.0,
     -100.0, 33.0,
@@ -526,8 +526,8 @@ STEPS_CW_INNER = [
 
 STEPS_CW_MIDDLE = [
     0.0,  0.0,
-     100.0,   7.5,
-    -100.0,  -4.5,
+     100.0,   7.0,
+    -100.0,  -3.5,
      100.0,   9.6,
      0.0, 12.0,
      0.0,  0.0,
@@ -535,7 +535,9 @@ STEPS_CW_MIDDLE = [
 
 STEPS_CCW_INNER = [
     0.0,  0.0,
-    -100.0,   -8.3,
+    -100.0,   -6.0,
+    100.0,   4.0,     # extra back-and-forth (24 cm bay: the nose hit the front
+    -100.0,  -3.0,     # magenta wall in the long forward arc) -- same as OUTER
     100.0,  37.0,
     0.0, 6.5,
     -100.0, 34.0,
@@ -553,7 +555,9 @@ STEPS_CCW_INNER = [
 # 1-2 cm off the 18.0.
 STEPS_CCW_OUTER = [
     0.0,  0.0,
-    -100.0,   -8.3,
+    -100.0,   -6.0,
+    100.0,   4.0,     # extra back-and-forth: 24 cm bay, the forward arc hit the
+    -100.0,  -3.0,     # front magenta wall. OUTER must stay the beginning of INNER.
     100.0,  12.0,
 ]
 
@@ -580,18 +584,18 @@ STEPS_CCW = list(STEPS_DEFAULT)
 # assumes that park move k drives unpark move n-1-k in reverse.
 STEPS_PARK_CW = [
       0.0,   -0.0,
-   -100.0,  -24.5,
-    100.0,   -11.0,
-   -100.0,    6.0,
-    100.0,   -8.0,
+   -100.0,  -25.0,     # comp_25: -24.5 too short (front wall); comp_26: -26.0 hit the rear (askew start)
+    100.0,    -9.0,     # comp_26/28/29: hit the rear wall in this arc (2.5-3 cm short) -> 2 cm shorter
+   -100.0,    6.0,     # drives 3.5 (park_fwd_corr_cm -2.5); stays: the arc above was stopped by the wall where it now ends
+    100.0,   -6.0,     # comp_29: ended with the rear on the wall (front 0.222 m)
     -15.0,   -0.0,
 ]
 STEPS_PARK_CCW = [
       0.0,    0.0,
     -100.0,  -23.0,
-    100.0,   -12.0,
-    -100.0,    6.0,
-    100.0,   -6.0,
+    100.0,   -10.0,     # comp_26/28/29: hit the rear wall in this arc (2.5-3 cm short) -> 2 cm shorter
+    -100.0,    6.0,     # drives 3.5 (park_fwd_corr_cm -2.5); stays: the arc above was stopped by the wall where it now ends
+    100.0,   -4.5,     # comp_19: -6.0 drove 7.4 cm back from 1.5 cm before the front wall into the rear wall (24 cm bay)
     -30.0,    0.0,
 ]
 
