@@ -621,7 +621,7 @@ class Round1Controller(Node):
         # and the car parked ~5 cm too far from the wall (sim_11-14).
         'park_lat_comp_max':        ('park_lat_comp_max',        0.06, float),   # m sideways
         'park_lat_comp_arc_max':    ('park_lat_comp_arc_max',    5.0, float),    # cm per arc
-        'park_lat_comp_along_max':  ('park_lat_comp_along_max',  0.02, float),   # m further back at most (reverse-only)
+        'park_lat_comp_along_max':  ('park_lat_comp_along_max',  0.01, float),   # m further back at most (reverse-only)
         'park_heading_tol_deg':     ('park_heading_tol_deg',     2.5, float),
         # Plausibility: the straight approach must not be longer than this.
         'park_max_approach':        ('park_max_approach',        1.20, float),
@@ -875,7 +875,7 @@ class Round1Controller(Node):
         # 0 = off (as before). _cw/_ccw per direction: in CCW (run 48) -7 deg
         # heading remained after the backing up, and the second park move ran
         # into the magenta wall.
-        'park_overshoot_cw':        ('park_overshoot_cw',        0.30, float),
+        'park_overshoot_cw':        ('park_overshoot_cw',        0.45, float),   # comp_29: more reverse distance to straighten the heading
         'park_overshoot_ccw':       ('park_overshoot_ccw',       0.0, float),
         # The closed-loop approach stops this far SHORT of the start pose.
         # After the stop it still rolls on (dead time + braking distance) and
@@ -942,7 +942,7 @@ class Round1Controller(Node):
         # deg) -- the first arc then starts pre-rotated, comes out too short
         # or (with the lateral compensation) too deep. Full-lock pair if the
         # heading is off by more than this, then remeasure. 0 = off.
-        'park_start_heading_tol':   ('park_start_heading_tol',   2.5, float),
+        'park_start_heading_tol':   ('park_start_heading_tol',   0.0, float),   # off: CW drives further past instead (park_overshoot_cw)
         'park_end_guard_tol':       ('park_end_guard_tol',       0.015, float),
         # First long reverse arc of the park sequence in two parts: this share,
         # then the rest from the gyro heading so it ends on the planned heading.
