@@ -1434,11 +1434,13 @@ class Round1Controller(Node):
     def _outer_margin(self, wall_idx):
         """Obstacle at the outer wall of this straight (magenta walls of the
         parking bay on the start straight), for passing on the outside.
-        Not on the finish straight when parking -- there it deliberately
-        drives on the parking line, its own logic keeps the distance."""
+        Only used for passing a pylon on the OUTER side (pass_offset); the
+        approach to the parking line keeps its own distance. It used to be
+        switched off on the finish straight -- then a green pylon beside the
+        bay in CW (pass outside) was planned at 0.29 m from the outer wall,
+        3.5 cm from the magenta wall tips, and the car hit the bay
+        (only_parken_54). Now it passes midway between pylon and bay walls."""
         if not (self.parking_lot_present or self.park_origin is not None):
-            return 0.0
-        if self._park_active() and (self._on_finish_straight() or self._finish_straight_next()):
             return 0.0
         sw = self._start_wall()
         if sw is None and self.corner_count == 0 and self.corner_idx is not None:
