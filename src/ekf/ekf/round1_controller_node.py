@@ -446,6 +446,9 @@ class Round1Controller(Node):
         # unpark sequence starts. A heading error rotates the WHOLE sequence
         # with it -- 2 degrees over ~50 cm of manoeuvring are already 1.7 cm.
         'park_lat_tol':             ('park_lat_tol',             0.025, float),
+        # Sideways error at the start pose compensated by the first two
+        # full-lock arcs (_park_lateral_compensation). 1 = fully, 0 = off.
+        'park_lat_comp':            ('park_lat_comp',            1.0, float),
         'park_heading_tol_deg':     ('park_heading_tol_deg',     2.5, float),
         # Plausibility: the straight approach must not be longer than this.
         'park_max_approach':        ('park_max_approach',        1.20, float),
@@ -2998,6 +3001,7 @@ class Round1Controller(Node):
                    '' if abs(d_heading) < 0.002 else
                    ', start pose shifted by %+.1f cm because of the heading' % (d_heading * 100),
                    self.approach_iter))
+            self.park_start_lat_off = lat_off
             self._park_start_sequence()
             return
         if abs(d_heading) >= 0.002:
@@ -3398,12 +3402,71 @@ class Round1Controller(Node):
                     % (k + 1, new, cm, corr))
                 cm = new
             seq.append((steer, cm))
+        seq, lat_done = self._park_lateral_compensation(seq)
         self.park_in_steps = seq
-        if len(self.unpark_trajectory) != len(seq) + 1:
+        if lat_done or len(self.unpark_trajectory) != len(seq) + 1:
+            # target headings for the arc correction from the sequence that is
+            # actually driven -- otherwise it would undo the compensation
             self._park_reference_from_sequence(seq)
         self.get_logger().info(
             "Parking: %d moves from the reversed unpark sequence." % len(seq))
         self._park_start_moves(list(seq), 'in')
+
+    def _park_lateral_compensation(self, seq):
+        """Sideways error at the start pose -> lengthen/shorten the first
+        full-lock arcs so the car still ends at the planned depth, with the
+        same heading and the same position along the bay.
+
+        only_parken_45-49: with a pylon at the start of the finish straight
+        the car passes it on the inside (0.81 m from the outer wall) and has
+        only ~1 m left to the parking line; it arrived 1.9-2.5 cm too far
+        inside every time (without the pylon +-0.5 cm), and that error goes
+        1:1 into the final pose: parked 13.5 cm from the outer wall instead
+        of ~11. The arcs are solved through the drive model (finite
+        differences of +1 cm), so it follows changes of the park table:
+        three arcs -> depth, heading and along position; two -> depth and
+        heading. Returns (sequence, applied)."""
+        lat = getattr(self, 'park_start_lat_off', 0.0) * self.park_lat_comp
+        if abs(lat) < 0.005:
+            return seq, False
+        lat = max(-0.04, min(0.04, lat))
+        arcs = [k for k, (st, cm) in enumerate(seq) if abs(st) >= 50.0 and abs(cm) >= 1.0][:3]
+        if len(arcs) < 2:
+            return seq, False
+
+        def end(sq):
+            tr = trajectory((0.0, 0.0, 0.0), mirror_steps(sq, True))
+            x, y, th = tr[-1][0]
+            return np.array([y, th, x])
+
+        def bent(sq, k, d_cm):
+            out = list(sq)
+            st, cm = out[k]
+            out[k] = (st, math.copysign(max(0.5, abs(cm) + d_cm), cm))
+            return out
+        try:
+            e0 = end(seq)
+            J = np.column_stack([end(bent(seq, k, 1.0)) - e0 for k in arcs])
+            n = len(arcs)
+            d = np.linalg.solve(J[:n, :n], np.array([-lat, 0.0, 0.0])[:n])
+        except Exception as err:          # model trouble must never stop parking
+            self.get_logger().warn("Parking: sideways compensation skipped (%s)." % err)
+            return seq, False
+        if np.max(np.abs(d)) > 3.0:
+            self.get_logger().warn(
+                "Parking: sideways compensation would change an arc by %.1f cm -- skipped."
+                % np.max(np.abs(d)))
+            return seq, False
+        out = seq
+        for k, dk in zip(arcs, d):
+            out = bent(out, k, float(dk))
+        self.get_logger().info(
+            "Parking: start pose %.1f cm %s -> %s (same depth, heading and position "
+            "along the bay)."
+            % (abs(lat) * 100, 'too far inside' if lat > 0 else 'too close to the wall',
+               ', '.join("move %d %.1f instead of %.1f cm" % (k + 1, abs(out[k][1]), abs(seq[k][1]))
+                         for k in arcs)))
+        return out, True
 
     def _park_reference_from_sequence(self, seq):
         """Target headings for the arc correction when there is no measured
