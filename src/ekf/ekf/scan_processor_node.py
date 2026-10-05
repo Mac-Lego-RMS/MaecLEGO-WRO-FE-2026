@@ -170,6 +170,11 @@ BAY_VOTES_INNER_END = 11       # votes (median) when the front comes from the in
 BAY_SIDE_MIN_LEN = 0.15        # shorter pieces are no wall for the side test (pylon 5 cm)
 PYLON_MAX_EXTENT = 0.08        # a pylon cluster is at most this large
 PYLON_HALF = 0.025             # seen face -> centre of the 5 cm pylon
+# Pylon-seat front vs the inner-wall end (what the parking is tuned to), same
+# placement in the bay: bay_pylon_1/bay_free_1 -15.7 mm, only_parken_32/31
+# -22.0 mm (pylon placed anew) -> +19 mm. The rest (~+-3 mm) is how exactly
+# the pylon stands on its mark.
+PYLON_SEAT_CORR = 0.019
 
 # Mask the parking bay out of the wall extraction. The bay walls are not in the
 # wall model, and in the last corner the path goes right past them: in one run
@@ -1567,7 +1572,7 @@ class ScanProcessor(Node):
             if abs((d_inner - lateral(*m)) - SEAT_INNER_INSET) > 0.08:
                 continue                     # not on an inner-column seat
             for row in (1.0, 1.5, 2.0):
-                f = along(*m) + row
+                f = along(*m) + row + PYLON_SEAT_CORR
                 if lo - 0.03 <= f <= hi + 0.03 and f >= FRONT_MIN_DIST:
                     fronts.append(f)
         if not fronts or max(fronts) - min(fronts) > 0.03:
