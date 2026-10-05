@@ -543,14 +543,19 @@ STEPS_CCW_INNER = [
      0.0,  0.0,
 ]
 
+# OUTER: since 04.10. also the default WITHOUT a pylon (unpark_default_outer in
+# round1_controller) -- out of the bay as close to the outer wall as possible,
+# so there is more room to react to the pylons of the start straight.
+# Like the normal sequence but without the diagonal straight (5.0 -> 0) and a
+# shorter counter-arc. Simulated: ends at 0.261 m from the outer wall, +0.3 deg
+# (normal: 0.295 m, -7 deg). The magenta wall tips at 0.20 m + half the car
+# width leave no room for much less. The real car turned ~15 % more than the
+# model in the counter-arc so far -- if it ends turned towards the wall, take
+# 1-2 cm off the 18.0.
 STEPS_CCW_OUTER = [
     0.0,  0.0,
-     100.0,   6.0,
-    -100.0,  -4.5,
-     100.0,   9.6,
-     0.0, 5.0,
-    -100.0, 19.0,
-     0.0,  0.0,
+    -100.0,   -8.3,
+    100.0,  12.0,
 ]
 
 # Normal sequences per direction. They are the REFERENCE FOR PARKING (the
@@ -585,8 +590,8 @@ STEPS_PARK_CW = [
 ]
 STEPS_PARK_CCW = [
       0.0,    0.0,
-   -100.0,  -24.0,
-    100.0,   -14.5,
+   -100.0,  -20.0,
+    100.0,   -12.7,
    -100.0,    6.0,
     100.0,   -6.0,
       0.0,    0.0,

@@ -99,9 +99,23 @@ PACE_PROFILES = {
                    v_obstacle_steep=0.40, v_steep_path=0.30),
     'fast':   dict(v_drive=0.75, v_turn=0.55, v_obstacle=0.55,
                    v_obstacle_steep=0.55, v_steep_path=0.35),
+    # Open challenge (start_robot.sh --open, OPEN_PACE): no pylons, so only
+    # v_drive and v_turn act; the three obstacle speeds are only set so the
+    # profile is complete. open_medium = what open_test_3 drove cleanly
+    # (0.75 / 0.55). open_fast (1.2 / 0.8) is UNTESTED: the steering is only
+    # calibrated up to 0.75 m/s (above that the bridge uses the 0.75 table),
+    # the car slid on the left from ~22 deg at 0.75 m/s, and it brakes with
+    # only ~0.6 m/s^2 -- see brake_dist / finish_decel.
+    'open_slow':   dict(v_drive=0.55, v_turn=0.45, v_obstacle=0.45,
+                        v_obstacle_steep=0.45, v_steep_path=0.35),
+    'open_medium': dict(v_drive=0.75, v_turn=0.55, v_obstacle=0.55,
+                        v_obstacle_steep=0.55, v_steep_path=0.35),
+    'open_fast':   dict(v_drive=1.20, v_turn=0.80, v_obstacle=0.80,
+                        v_obstacle_steep=0.80, v_steep_path=0.35),
 }
 PACE_KEYS = ('v_drive', 'v_turn', 'v_obstacle', 'v_obstacle_steep', 'v_steep_path')
 LIDAR_X = 0.1101            # LiDAR ahead of the rear axle (wall_extraction.LIDAR_OFFSET_X)
+UNPARK_LINK_SETTLE = 1.0    # s the ESP connections must stand before the first move
 
 
 def yaw_from_quaternion(q):
@@ -225,6 +239,10 @@ class Round1Controller(Node):
         # the error -- with 0.26 s dead time that overshoots and has to be
         # steered back. Factor on the feedforward, 0 = off.
         'path_feedforward': ('path_feedforward', 1.0, float),
+        # Return path after a corner (no obstacle path): length of the
+        # transition onto the lane line. 0.5 m gave -7..-13 deg of feedforward
+        # for 3-9 cm (open_test_1); over 0.9 m the curvature is a third.
+        'return_path_len':  ('return_path_len',  0.9, float),
         # Corner 1 right after unparking: if the turn-in point lies more than
         # first_corner_backup_min BEHIND it, first back up straight (ESP
         # position move) instead of anchoring the arc with the smallest radius
@@ -328,6 +346,12 @@ class Round1Controller(Node):
         'k_heading':     ('k_heading',     1.0,   float),   # Stanley heading-term weight (damping)
         'k_heading_v_ref': ('k_heading_v_ref', 0.45, float),
 	    'stanley_v_ref': ('stanley_v_ref', 0.0,   float),   # >0: fixed v for cross-track gain (speed-indep.)
+        # >0: floor for the speed in the cross-track term. At start-up v_act is
+        # ~0 and gets clamped to 0.2 -- then 15 cm off the line already ask for
+        # atan(1.2*0.15/0.2) = 42 deg, i.e. full lock: in open_test_12/13 the
+        # start swung to -30 deg and back, and the robot reached the first
+        # corner still oscillating. With 0.6: 17 deg. Open challenge only.
+        'stanley_ct_v_min': ('stanley_ct_v_min', 0.0, float),
         'i_ct_limit':    ('i_ct_limit',    math.radians(15.0), lambda v: math.radians(float(v))),  # anti-windup [deg->rad]
         'max_steer_deg': ('max_steer',     25.0,  lambda v: math.radians(float(v))),
         'wheelbase':     ('wheelbase',     0.10,  float),
@@ -336,6 +360,15 @@ class Round1Controller(Node):
         'v_drive':       ('v_drive',       0.75,  float),   # straight cruise
         'v_turn':        ('v_turn',        0.55,  float),   # through the arc
         'accel_dist':    ('accel_dist',    0.2,   float),   # ramp v_turn->v_drive after a corner
+        # Accelerate already in the END of the corner: from this much remaining
+        # heading (deg, after the dead time) v rises from v_turn towards
+        # v_drive, capped at sqrt(turn_lat_accel_max * R). The motor needs
+        # ~0.6 s from 0.8 to 1.2 m/s (open_test_8-10), so a ramp that only
+        # starts at the end of the corner reaches v_drive late. The path is
+        # unchanged: the turn steers a curvature, not a yaw rate. Never in
+        # the last corner (the finish follows). 0 = off (obstacle challenge).
+        'turn_exit_accel_deg': ('turn_exit_accel_deg', 0.0, float),
+        'turn_lat_accel_max':  ('turn_lat_accel_max',  1.6, float),   # m/s^2
         'brake_dist':    ('brake_dist',    0.2,   float),   # ramp v_drive->v_turn before T_A
         # lap / finish
         'n_corners':     ('n_corners',     4,     int),
@@ -347,6 +380,22 @@ class Round1Controller(Node):
         # and parking follows, and an error cannot be made up any more. 0
         # switches the cap off.
         'v_finish':      ('v_finish',      0.30,  float),
+        # Last corner before parking: exit this far INSIDE the parking line
+        # (into the field); the finish straight closes the gap towards the
+        # wall. The parking line is ~0.25 m from the outer wall, right next to
+        # the magenta walls, and the corner came out 10 cm wide
+        # (only_parken_1). 0 = exit straight onto the parking line.
+        'park_exit_margin': ('park_exit_margin', 0.12, float),
+        # Minimum gap of the car side to the tips of the magenta walls while
+        # driving past the bay on the parking line (see _park_apply_offset).
+        # 0.03 was 1 cm in practice (only_parken_2): the crawl approach holds
+        # the line only to ~1.5-2 cm (steering play at 0.15 m/s).
+        'park_wall_clearance': ('park_wall_clearance', 0.05, float),
+        # Deceleration for braking to v_finish before the last corner. With
+        # finish_decel 0.8 it braked only ~0.5 m before the turn-in point and
+        # the ESP undershot to 0.16 m/s right at it -- it felt like braking in
+        # the corner (only_parken_2). Softer = earlier.
+        'park_turn_decel': ('park_turn_decel', 0.5, float),
         'finish_tol':    ('finish_tol',    0.04,  float),   # stop tolerance on front_dist
         # --- Unparking from the start bay -----------------------------------
         # The two magenta walls stand perpendicular on the outer wall and
@@ -449,6 +498,10 @@ class Round1Controller(Node):
         # to 0.75 m the perception checks from the bay. Whatever stands beside
         # or behind it does not count.
         'unpark_decide_from':       ('unpark_decide_from',       0.10, float),
+        # No pylon ahead of the bay: unpark with the OUTER sequence (close to
+        # the outer wall) instead of the middle/normal one -- more room to
+        # react to the pylons of the start straight. 0 = middle as before.
+        'unpark_default_outer':     ('unpark_default_outer',     1.0, lambda v: bool(float(v))),
         'unpark_decide_to':         ('unpark_decide_to',         0.75, float),
         # Final pose of the NORMAL unpark sequence relative to the start pose
         # in the bay (measured). From it the park start pose if the inner
@@ -456,16 +509,42 @@ class Round1Controller(Node):
         # sequence.
         'park_std_long_cw':         ('park_std_long_cw',         0.315, float),
         'park_std_lat_cw':          ('park_std_lat_cw',          0.227, float),
-        'park_std_long_ccw':        ('park_std_long_ccw',        0.276, float),
-        'park_std_lat_ccw':         ('park_std_lat_ccw',         0.202, float),
+        # CCW re-measured 04.10. (only_parken_1-4: 31.3-33.3 long, 14.2-16.8
+        # lat) -- they matter now that the outer sequence is the default
+        # without a pylon: then the park start pose comes from here.
+        'park_std_long_ccw':        ('park_std_long_ccw',        0.323, float),
+        # Where the robot stood IN the bay: gap base_link -> front magenta
+        # wall, measured straight ahead in the LiDAR during the unpark
+        # direction search. The bay is 8.75 cm longer than the car; everything
+        # above (park_std_*, measured unpark end, park_offset_*) was tuned with
+        # the car at this gap. Standing further forward shifts the whole park
+        # start pose forward by the same amount (only_parken_7: gap 0.159,
+        # started parking ~8 cm too far ahead) -- so the park start pose is
+        # shifted back by (gap - ref). Reference CCW = only_parken_1-4
+        # (0.240-0.245). 0 = off (CW not measured yet).
+        'park_bay_front_ref_ccw':   ('park_bay_front_ref_ccw',   0.242, float),
+        'park_bay_front_ref_cw':    ('park_bay_front_ref_cw',    0.0, float),
+        # Share of the gap difference that is applied. Car ~8 cm forward in
+        # the bay each time: 1.0 ~3 cm too far back (only_parken_8), 0.65 ~3 cm
+        # too far ahead (only_parken_9), 0.83 still too far ahead -- second
+        # reverse move caught on the bay wall (only_parken_11). The heading
+        # shift at the start pose adds +-1.5 cm on top. Too far ahead hits
+        # the wall, too far back only parks a bit deeper -> full 1.0.
+        'park_bay_front_gain':      ('park_bay_front_gain',      1.0, float),
+        'park_std_lat_ccw':         ('park_std_lat_ccw',         0.152, float),
         # Manual offset of the park start pose [m], added on top of
         # everything else -- no matter whether it unparked normally or with a
         # variant. long: + = further in the direction of travel (towards the
         # next corner). lat: + = further away from the outer wall (into the
         # field). The parking line the approach is aligned to moves along
         # laterally. Per direction: CCW (previous value) and CW
-        'park_offset_long_ccw':     ('park_offset_long_ccw',     0.06, float),
-        'park_offset_lat_ccw':      ('park_offset_lat_ccw',      -0.05, float),
+        # only_parken_2 (04.10.): with +6 / -5 cm it stopped 40 cm past the
+        # bay, the first reverse arc put the rear onto the front magenta
+        # wall, and it parked 8 cm too deep (5.7 cm from the outer wall,
+        # against it). Both back to 0. only_parken_3: looked good, but very
+        # close to the wall in the first two moves -> start 1.5 cm further back.
+        'park_offset_long_ccw':     ('park_offset_long_ccw',     -0.015, float),
+        'park_offset_lat_ccw':      ('park_offset_lat_ccw',      0.0, float),
         'park_offset_long_cw':      ('park_offset_long_cw',      0.0, float),
         'park_offset_lat_cw':       ('park_offset_lat_cw',       -0.03, float),
         # --- /localization_state -------------------------------------------
@@ -767,6 +846,8 @@ class Round1Controller(Node):
         self.loc_lost_t0 = None
         self.loc_wait_t0 = None       # parking waits for 'ok'
         self.bay = None               # /parking_bay: measured bay walls
+        self.bay_front_gaps = []      # start: base_link -> front magenta wall [m]
+        self.unpark_link_t0 = None    # since when all ESP connections are matched
         self.unpark_trajectory = []   # poses at all move boundaries of the unparking
         self.park_loc_uncertain = False  # keeps parking without corrections
         self._finish_reported = False
@@ -803,6 +884,7 @@ class Round1Controller(Node):
         self.obstacles_raw = None         # unfiltered, for freezing and refiltering
         self._phantom_ids = set()         # phantoms already reported (log only once)
         self.obs_path = None              # planned polyline [(x,y)] for this straight
+        self.obs_path_is_return = False   # obs_path is only the return path after a corner
         self.obs_max_slope = 0.0          # steepest lane change in the current plan
         self.obs_path_end_q = None        # lateral offset the path ends on (= corner entry)
         self._path_idx = 0                # nearest-segment cursor for path following
@@ -813,6 +895,7 @@ class Round1Controller(Node):
         self.scan_pause_t0 = 0.0
         self.last_odom_time = None
         self.button_pressed = False
+        self.inputs_wait_t0 = None    # WAIT_INPUTS after the button: since when
         self.v_cmd = 0.0
         self.arc = None
         self.drive_start_xy = (0.0, 0.0)  # for the post-corner accel ramp
@@ -880,10 +963,11 @@ class Round1Controller(Node):
         # (run 49: 3 s with spinning wheels at the inner wall).
         self.create_subscription(LaserScan, '/scan', self.trigger_scan_cb, 5)
 
-        # Only for unparking (and the park test, which drives the same ESP
-        # moves). Deliberately not always created -- otherwise the controller
-        # hangs on /scan and four more bridge topics for no reason.
-        if self.unpark or self.park_test:
+        # ESP position moves: for unparking, the park test and emergency
+        # manoeuvring. Without unparking (open challenge) manoeuvring used to
+        # be impossible -- open_test_2 ended with an emergency stop 1 cm in
+        # front of the wall instead of backing up.
+        if self.unpark or self.park_test or self.manoeuvre:
             self.pub_steer = self.create_publisher(
                 Float32, '/esp_serial_bridge/steer', 10)
             self.pub_move = self.create_publisher(
@@ -898,6 +982,10 @@ class Round1Controller(Node):
             self.create_subscription(Int32MultiArray,
                                      '/esp_serial_bridge/move_done',
                                      self.unpark_move_done_cb, 10)
+        # Only for unparking (and the park test). Deliberately not always
+        # created -- otherwise the controller hangs on /scan and the parking
+        # direction for no reason.
+        if self.unpark or self.park_test:
             self.create_subscription(LaserScan, '/scan',
                                      self.unpark_scan_cb, 10)
             # DELIBERATELY NOT latched. A latched message outlives the run
@@ -949,13 +1037,25 @@ class Round1Controller(Node):
         # discovery has finished is simply lost, and the LEDs would stay
         # yellow although the robot is about to drive.
         self.pub_pixel = self.create_publisher(String, '/esp_serial_bridge/pixel', 10)
+        self.led_phase = 'ready'      # ready (green) -> run (white) -> finished (rainbow)
         self._pixel_timer = self.create_timer(0.2, self._pixel_running)
 
     def _pixel_running(self):
+        if self.led_phase != 'ready':
+            self._pixel_timer.cancel()      # run already started -- no green over white
+            return
         if self.pub_pixel.get_subscription_count() == 0:
             return
         self.pub_pixel.publish(String(data='green'))
         self._pixel_timer.cancel()
+
+    def _pixel(self, phase, text):
+        """Status LEDs once per phase: white while the run is going, rainbow
+        when round 1 is finished (stopped at the finish or parked)."""
+        if self.led_phase == phase:
+            return
+        self.led_phase = phase
+        self.pub_pixel.publish(String(data=text))
 
     def _corner_msg_type(self):
         from robot_msgs.msg import CornerGeometry
@@ -1179,8 +1279,47 @@ class Round1Controller(Node):
             dl, dq = self.park_offset_long_cw, self.park_offset_lat_cw
         else:
             dl, dq = self.park_offset_long_ccw, self.park_offset_lat_ccw
-        if self.park_start is None or (dl == 0.0 and dq == 0.0):
+        if self.park_start is None:
             return
+        ref = (self.park_bay_front_ref_cw if self.unpark_direction == 'CW'
+               else self.park_bay_front_ref_ccw)
+        if ref > 0.0 and self.bay_front_gaps:
+            gap = float(np.median(self.bay_front_gaps))
+            d = max(-0.10, min(0.10, self.park_bay_front_gain * (gap - ref)))
+            if abs(d) >= 0.005:
+                self._park_shift(d, 0.0)
+                self.get_logger().info(
+                    "Park start pose shifted %+.1f cm along: the car stood %.1f cm "
+                    "from the front bay wall at the start (reference %.1f cm), i.e. "
+                    "%.1f cm further %s in the bay (x %.2f)." % (
+                        d * 100, gap * 100, ref * 100, abs(gap - ref) * 100,
+                        'forward' if gap < ref else 'back', self.park_bay_front_gain))
+        if dl != 0.0 or dq != 0.0:
+            self._park_shift(dl, dq)
+            self.get_logger().info(
+                "Park start pose shifted by hand (%s): %+.1f cm long, %+.1f cm lat "
+                "-> (%.3f, %.3f)%s."
+                % (self.unpark_direction, dl * 100, dq * 100, self.park_start[0], self.park_start[1],
+                   ', parking line %.3f m' % self.park_q if self.park_q is not None else ''))
+        # The approach drives PAST the bay on the parking line. The magenta
+        # walls reach BAY_DEPTH into the field: closer than half the car
+        # width plus park_wall_clearance and it scrapes their tips
+        # (only_parken_1: line 0.254 m = 1 mm on paper, driven 0.22-0.24 m =
+        # 2-4 cm into the walls). Never closer than that.
+        q_min = BAY_DEPTH + 0.5 * CAR_WIDTH + self.park_wall_clearance
+        if self.park_q is not None and self.park_q < q_min:
+            d = q_min - self.park_q
+            self._park_shift(0.0, d)
+            self.get_logger().warn(
+                "Parking line raised by %.1f cm to %.3f m: closer it scrapes the "
+                "magenta walls (%.2f + half car width %.3f + clearance %.2f). The "
+                "car parks that much further out -- if it is then not deep enough "
+                "in the bay, correct the park moves, not the line."
+                % (d * 100, self.park_q, BAY_DEPTH, 0.5 * CAR_WIDTH,
+                   self.park_wall_clearance))
+
+    def _park_shift(self, dl, dq):
+        """Move the park start pose dl along and dq away from the outer wall."""
         x, y, th = self.park_start
         if self.walls is not None:
             nx, ny, _dw = self.walls[self._start_wall()]   # points into the field
@@ -1194,11 +1333,6 @@ class Round1Controller(Node):
             self.park_q += dq
         if self.park_q_bay is not None:
             self.park_q_bay += dq
-        self.get_logger().info(
-            "Park start pose shifted by hand (%s): %+.1f cm long, %+.1f cm lat "
-            "-> (%.3f, %.3f)%s."
-            % (self.unpark_direction, dl * 100, dq * 100, self.park_start[0], self.park_start[1],
-               ', parking line %.3f m' % self.park_q if self.park_q is not None else ''))
 
     def _park_active(self):
         return self.park and self.park_start is not None
@@ -1277,7 +1411,12 @@ class Round1Controller(Node):
         if self._finish_straight_next():
             q = self._park_offset_for_wall(w)
             if q is not None:
-                return q
+                # park_exit_margin further into the field: the corner tends to
+                # come out wide, and the parking line lies only ~0.25 m from
+                # the outer wall, i.e. next to the magenta walls (only_parken_1:
+                # planned 0.25, came out at 0.15). From the field side the
+                # finish straight then closes the gap towards the wall.
+                return q + self.park_exit_margin
         auto = self._lane_default_offset(w) if self.use_auto_offset else None
         if auto is not None:
             return auto
@@ -1670,6 +1809,7 @@ class Round1Controller(Node):
         self.obs_path = None
         self.obs_path_end_q = None
         self.obs_max_slope = 0.0
+        self.obs_path_is_return = False
         self._path_idx = 0
         if self.arc is None or self.pose is None or self.obstacles is None:
             return
@@ -1884,35 +2024,65 @@ class Round1Controller(Node):
         The corner ends a few cm beside this line. Stanley used to aim at it
         at once -- at the end of the corner the steering command jumped in one
         tick from the corner steering to the opposite direction
-        (parken_test_28: -4.5 -> +9.8, -8.6 -> +6.6, -7.2 -> +12 deg). With the
-        path the lateral error starts at zero and is reduced over at least
-        0.5 m (at most 0.2 lat per long), with curvature feedforward."""
+        (parken_test_28: -4.5 -> +9.8, -8.6 -> +6.6, -7.2 -> +12 deg).
+
+        The path starts at the pose the car will have after the steering dead
+        time, TANGENT to its heading there (cubic Hermite), and ends parallel
+        on the lane line. It used to start parallel to the straight -- but at
+        the end of the corner the car still points 10-15 deg into the turn and
+        keeps yawing. Such a path first asked for the opposite direction and
+        then for the same one again; with the curvature feedforward that was a
+        hard swerve at every corner exit (open_test_1: -7..-13 deg, then back
+        to +5..+8 deg). Length return_path_len (at most 0.2 lat per long)."""
         if self.arc is None or self.pose is None or self.walls is None:
             return
         tx, ty = self.arc['travel']
         nx, ny, d = self.walls[self._entry_wall_idx(self.corner_idx)]
-        x, y, _ = self.pose
+        x, y, theta = self.pose
+        px, py, pth = self._pose_after_dead_time(x, y, theta)
         q_act = (nx * x + ny * y) - d
+        q_pred = (nx * px + ny * py) - d
         q_target = self.arc['o_in']
-        dq = q_target - q_act
-        if abs(dq) < 0.02:
+        # slope dq/ds of the heading after the dead time (q grows inward)
+        h_t = math.cos(pth) * tx + math.sin(pth) * ty
+        h_n = math.cos(pth) * nx + math.sin(pth) * ny
+        m0 = max(-0.6, min(0.6, h_n / h_t)) if h_t > 0.5 else 0.0
+        dq = q_target - q_pred
+        if abs(q_target - q_act) < 0.02 and abs(m0) < 0.05:
             return
         tA = self.arc['T_A']
         s_to_ta = (tA[0] - x) * tx + (tA[1] - y) * ty
-        change_len = max(0.50, abs(dq) / 0.20)
-        if s_to_ta < change_len + 0.05:
+        s_pred = max(0.0, (px - x) * tx + (py - y) * ty)
+        room = s_to_ta - s_pred - 0.05
+        change_len = min(max(self.return_path_len, abs(dq) / 0.20), room)
+        if change_len < 0.40:
             return                      # too short: then rather directly as before
         fx = x - q_act * nx
-        fy = y - q_act * ny             # foot point on the outer wall
-        from ekf.obstacle_path import ObstaclePathPlanner
-        dense_pts = ObstaclePathPlanner.densify([(0.0, q_act), (change_len, q_target), (s_to_ta + 0.3, q_target)], 0.05)
-        self.obs_path = [(fx + tx * s + nx * q, fy + ty * s + ny * q) for (s, q) in dense_pts]
+        fy = y - q_act * ny             # foot point on the outer wall (s = 0 here)
+        # one point behind, on the start tangent, so the nearest-segment search
+        # finds the path from the actual position
+        pts = [(0.0, q_pred - m0 * s_pred)]
+        n = max(int(change_len / 0.05), 2)
+        for k in range(n + 1):
+            t = k / n
+            h00 = 2 * t ** 3 - 3 * t ** 2 + 1
+            h10 = t ** 3 - 2 * t ** 2 + t
+            h01 = -2 * t ** 3 + 3 * t ** 2
+            pts.append((s_pred + t * change_len,
+                        h00 * q_pred + h10 * change_len * m0 + h01 * q_target))
+        s_end = s_pred + change_len
+        while s_end < s_to_ta + 0.3:
+            s_end += 0.05
+            pts.append((s_end, q_target))
+        self.obs_path = [(fx + tx * si + nx * qi, fy + ty * si + ny * qi) for (si, qi) in pts]
         self.obs_path_end_q = q_target
-        self.obs_max_slope = abs(dq) / change_len
+        self.obs_max_slope = max(abs(dq) / change_len, abs(m0))
+        self.obs_path_is_return = True
         self._path_idx = 0
         self.get_logger().info(
-            "Corner exit %.1f cm beside the lane line -- return path over %.2f m."
-            % (abs(dq) * 100.0, change_len))
+            "Corner exit %.1f cm beside the lane line, heading %+.1f deg to the "
+            "straight after the dead time -- return path over %.2f m from there."
+            % (abs(q_target - q_act) * 100.0, math.degrees(math.atan(m0)), change_len))
 
     def _obs_planner(self):
         from ekf.obstacle_path import ObstaclePathPlanner
@@ -2099,8 +2269,12 @@ class Round1Controller(Node):
         """One vote for the direction of travel. Runs only during the search."""
         if self.state != 'UNPARK_DIRECTION':
             return
-        result = direction_from_scan(
-            scan_to_points(msg), half_angle_deg=self.unpark_sector_deg)
+        pts = scan_to_points(msg)
+        # gap to the front magenta wall, straight ahead (see park_bay_front_ref_*)
+        sel = (np.abs(pts[:, 1]) < 0.04) & (pts[:, 0] > 0.0) & (pts[:, 0] + LIDAR_X < 0.45)
+        if sel.sum() >= 3:
+            self.bay_front_gaps.append(float(np.median(pts[sel, 0])) + LIDAR_X)
+        result = direction_from_scan(pts, half_angle_deg=self.unpark_sector_deg)
         self.unpark_last_reason = result['reason']
         if not result['confident']:
             self.unpark_votes = []
@@ -2114,6 +2288,11 @@ class Round1Controller(Node):
 
     def unpark_move_done_cb(self, msg):
         """Ack from the bridge: [move_id, status, position_decideg]."""
+        if len(msg.data) >= 2 and int(msg.data[1]) == 1:
+            # ESP timeout: the move did not reach its target in time. Short
+            # red blink; x=4 is a one-shot, the ESP then returns to the
+            # previous state (white) by itself.
+            self.pub_pixel.publish(String(data='blink red ms=250 x=4'))
         if len(msg.data) >= 3:
             self.unpark_move_done = (self.now_s(), int(msg.data[0]),
                                      int(msg.data[1]), msg.data[2] / 10.0)
@@ -2154,8 +2333,9 @@ class Round1Controller(Node):
         'outer', none -> 'middle'. Relative to the robot instead of a fixed
         row, because the bay lies at a different place of the straight
         depending on the layout. Returns (variant, pylon|None)."""
+        default = 'outer' if self.unpark_default_outer else 'middle'
         if self.obstacles is None or self.walls is None or self.pose is None:
-            return 'middle', None
+            return default, None
         x, y, th = self.pose
         front_d = self._first_corner_dist(x, y, th)
         w = min(range(len(self.walls)),
@@ -2197,7 +2377,7 @@ class Round1Controller(Node):
                 "Start straight not completely sampled -- a pylon ahead of it "
                 "may be undetected.")
         if nearest is None:
-            return 'middle', None
+            return default, None
         o = nearest[0]
         inner = OBST_RED if direction == 'CW' else OBST_GREEN
         outer = OBST_GREEN if direction == 'CW' else OBST_RED
@@ -2415,6 +2595,17 @@ class Round1Controller(Node):
                     self.get_logger().info(
                         "Unparking: waiting for the bridge (%s)"
                         % ', '.join(missing), throttle_duration_sec=1.0)
+                self.unpark_link_t0 = None
+                return
+            # get_subscription_count() only says that OUR side knows the
+            # bridge. Its side may still be matching -- then the first
+            # messages are lost without a trace (only_parken_10: unparking
+            # started 10 ms after the node was up, pid_set and move 1 never
+            # reached the bridge, abort after 15 s without ack). So: all four
+            # connections must have stood for UNPARK_LINK_SETTLE s.
+            if self.unpark_link_t0 is None:
+                self.unpark_link_t0 = t_now
+            if t_now - self.unpark_link_t0 < UNPARK_LINK_SETTLE:
                 return
             self._unpark_plan()
             return
@@ -3254,6 +3445,7 @@ class Round1Controller(Node):
         self._unpark_pid(self.unpark_pid_after)
         self.publish_stop()
         self.state = 'DONE'
+        self._pixel('finished', 'rainbow')
         r = self._bay_dists(x, y, theta)
         if r is not None:
             rear, front, _ = r
@@ -3644,7 +3836,10 @@ class Round1Controller(Node):
             % (self.manoeuvre_attempts, self.manoeuvre_max, reason, dist * 100, steer,
                math.degrees(err) if self.arc is not None else 0.0))
         self.manoeuvre_prev_state = self.state
-        self.unpark_steps_before_manoeuvre = list(self.unpark_steps_run)
+        # Without unparking (open challenge) there is no unpark sequence --
+        # list(None) crashed the controller on the first manoeuvre (open_test_7).
+        self.unpark_steps_before_manoeuvre = (list(self.unpark_steps_run)
+                                              if self.unpark_steps_run is not None else None)
         self.unpark_pos_prev = None
         self._unpark_pid(self.unpark_pid)
         self._park_start_moves([(steer_to_wire(steer), command * 100.0)], 'manoeuvre')
@@ -3757,7 +3952,10 @@ class Round1Controller(Node):
                 and getattr(self, 'obs_max_slope', 0.0) > self.steep_path_from):
             cap = (self.v_steep_path if cap is None
                    else min(cap, self.v_steep_path))
-        if self.v_finish > 0.0:
+        # Only when parking follows: without it (open challenge) the look-ahead
+        # brake alone stops on the point, and v_finish made the whole last
+        # corner and the finish straight a crawl (open_test_1: 0.26 m/s).
+        if self.v_finish > 0.0 and self._park_active():
             last_corner = (self.state == 'TURN'
                            and self.corner_count + 1 >= self.n_corners)
             if last_corner or self._on_finish_straight():
@@ -3848,6 +4046,14 @@ class Round1Controller(Node):
     def dir_step(self):
         return 1 if self.race_direction == 'CCW' else -1
 
+    def _travel_dir(self, idx):
+        """Unit vector of travel along the straight that ENDS at corner idx."""
+        a = self.corners[(idx - self.dir_step()) % 4]
+        b = self.corners[idx]
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        n = math.hypot(dx, dy) or 1.0
+        return dx / n, dy / n
+
     def pick_first_corner(self, x, y, theta):
         """Which corner is the robot heading toward.
 
@@ -3856,6 +4062,20 @@ class Round1Controller(Node):
         side -- so among the corners ahead, pick the one with the SMALLEST
         lateral offset from the travel line (closest to straight ahead).
         """
+        # After unparking it stands on the start straight for sure -- take
+        # the corner at its END in the driving direction from the map, not
+        # from the heading. only_parken_12: the unpark sequence ended at
+        # +50 deg, the heading pointed closer to the corner of the NEXT
+        # straight, corner 1 was skipped and it later "parked" one straight
+        # too far.
+        w = self._start_wall() if self.unpark_direction else None
+        if (w is not None and self.race_direction in ('CW', 'CCW')
+                and self.corners is not None):
+            idx = (w + 1) % 4 if self.dir_step() > 0 else w
+            tx, ty = self._travel_dir(idx)
+            c = self.corners[idx]
+            if (c[0] - x) * tx + (c[1] - y) * ty > 0.1:     # really ahead
+                return idx
         tx, ty = math.cos(theta), math.sin(theta)
         px, py = -ty, tx                                  # left-perpendicular
         best_i, best_lat = None, 1e9
@@ -4220,6 +4440,17 @@ class Round1Controller(Node):
         if self.pose is None:
             return
         x, y, theta = self.pose
+        # LEDs white as soon as the run is under way (button pressed, or
+        # without require_button: as soon as it leaves the waiting states).
+        if (self.led_phase == 'ready' and self.state not in
+                ('WAIT_INPUTS', 'WAIT_BUTTON', 'UNPARK_BUTTON', 'DONE')):
+            self._pixel('run', 'white')
+        # DONE without the finish / parking (those set 'finished' first):
+        # aborted -- emergency stop, unpark abort, ... Red blinking until the
+        # next start. unpark_only ends in DONE on purpose, that is no abort.
+        if (self.state == 'DONE' and self.led_phase in ('ready', 'run')
+                and not self.unpark_only):
+            self._pixel('abort', 'blink red ms=500')
 
         # Before everything else, and deliberately BEFORE the odom age check:
         # the unpark moves run on the ESP and need no fresh pose.
@@ -4237,7 +4468,21 @@ class Round1Controller(Node):
             return
 
         if self.state == 'WAIT_INPUTS':
+            # Button FIRST: the scan_processor only measures start pose and
+            # map after the press (rules: nothing measured before the start).
+            if self.require_button and not self.button_pressed:
+                self.publish_stop()
+                return
             if not self.inputs_ready():
+                if self.require_button:
+                    if self.inputs_wait_t0 is None:
+                        self.inputs_wait_t0 = self.now_s()
+                    if self.now_s() - self.inputs_wait_t0 > 3.0:
+                        self.get_logger().warn(
+                            "Button pressed %.0f s ago, still no /front_wall_x -- "
+                            "start detection of the scan_processor (window 9)?"
+                            % (self.now_s() - self.inputs_wait_t0),
+                            throttle_duration_sec=2.0)
                 return
             if (self.park_test and self.park_start is None
                     and not self._park_test_prepare()):
@@ -4246,7 +4491,9 @@ class Round1Controller(Node):
             if self.state == 'DRIVE':
                 self._enter_drive(x, y, theta)
             self.get_logger().info("Inputs there. " +
-                                   ("Waiting for button..." if self.require_button else "Driving off."))
+                                   ("Waiting for button..."
+                                    if self.require_button and not self.button_pressed
+                                    else "Driving off."))
             return
 
         if self.state == 'WAIT_BUTTON':
@@ -4368,7 +4615,10 @@ class Round1Controller(Node):
         """
         self.first_corner_check = False
         c = self.corners[self.corner_idx]
-        front_d = (c[0] - x) * math.cos(theta) + (c[1] - y) * math.sin(theta)
+        # along the straight, not along the heading (that can be +50 deg
+        # off right after unparking)
+        tx, ty = self._travel_dir(self.corner_idx)
+        front_d = (c[0] - x) * tx + (c[1] - y) * ty
         # Already decided during the hold? Then stick with it (it has not
         # moved since). Otherwise (geometry only came while driving) check now.
         here = (self.unpark_scan_here if self.unpark_scan_here is not None
@@ -4477,7 +4727,10 @@ class Round1Controller(Node):
             ra = max(0.0, min(1.0, dist_since_corner / self.accel_dist))
         else:
             ra = 1.0
-        v_acc = self.v_turn + ra * (self.v_drive - self.v_turn)
+        # from the speed the corner ended with (turn_exit_accel_deg), not
+        # back down to v_turn
+        v0 = max(self.v_turn, min(getattr(self, 'exit_v', self.v_turn), self.v_drive))
+        v_acc = v0 + ra * (self.v_drive - v0)
         # braking ramp (falls from v_drive to v_turn as dist_to_TA -> 0)
         if self.brake_dist > 1e-3:
             rb = max(0.0, min(1.0, dist_to_TA / self.brake_dist))
@@ -4561,6 +4814,7 @@ class Round1Controller(Node):
                         % self.park_hold_s)
                 else:
                     self.state = 'DONE'
+                    self._pixel('finished', 'rainbow')
                 return
 
             # look-ahead braking: v = sqrt(2*a*remain) reaches 0 exactly at the
@@ -4727,6 +4981,13 @@ class Round1Controller(Node):
             return
 
         v = self._speed_profile(to_TA, dsc)
+        # Last corner before parking: brake to v_finish BEFORE the turn-in
+        # point, not in the corner (only_parken_1). Kinematic ramp, the
+        # dead-time travel subtracted.
+        if (self.v_finish > 0.0 and self._park_active()
+                and self.corner_count + 1 >= self.n_corners):
+            rest = max(to_TA - max(self.v_act, 0.0) * self.steer_dead_time, 0.0)
+            v = min(v, math.sqrt(self.v_finish ** 2 + 2.0 * self.park_turn_decel * rest))
         # Settle before the corner: if it runs unsteadily towards T_A, slow down.
         # That gives Stanley more time per metre without shifting the geometry.
         if (to_TA < self.turn_in_settle_window
@@ -4737,7 +4998,12 @@ class Round1Controller(Node):
                 f"Settling before the corner: to_TA={to_TA:.2f} lat={lateral:.3f} "
                 f"om={abs(self.last_cmd[1]):.2f} -> v={v:.2f}.",
                 throttle_duration_sec=0.5)
-        if self.obs_path:
+        # Only a real obstacle path caps the speed. The return path after a
+        # corner is a few cm of lane correction -- capped too, every straight
+        # with one stayed at v_obstacle 0.55 and every straight without one
+        # went to v_drive 0.75, depending on how far the corner ended beside
+        # the line (open_test_3).
+        if self.obs_path and not self.obs_path_is_return:
             # safety before speed on obstacle straights; steeper swap -> slower
             v_cap = (self.v_obstacle_steep
                      if self.obs_max_slope >= self.obs_slope_slow
@@ -4761,6 +5027,17 @@ class Round1Controller(Node):
         t_hat = (-s * r_hat[1], s * r_hat[0])
         e_th = wrap(math.atan2(t_hat[1], t_hat[0]) - thp)
         theta_err = wrap(self.arc['theta_target'] - thp)
+
+        # speed: v_turn, rising towards v_drive at the end of the corner
+        v_cmd = self.v_turn
+        if (self.turn_exit_accel_deg > 0.0 and self.v_drive > self.v_turn
+                and not self._finish_straight_next()):
+            lim = math.radians(self.turn_exit_accel_deg)
+            if abs(theta_err) < lim:
+                f = 1.0 - abs(theta_err) / lim
+                v_cap = max(self.v_turn, math.sqrt(self.turn_lat_accel_max * R))
+                v_cmd = min(self.v_turn + f * (self.v_drive - self.v_turn), v_cap)
+        self.turn_v_cmd = v_cmd
 
         blend = max(0.0, min(1.0, abs(theta_err) / self.ff_blend)) if self.ff_blend > 1e-6 else 1.0
         if self.turn_curvature:
@@ -4792,6 +5069,8 @@ class Round1Controller(Node):
         if s * theta_err <= self.sweep_tol:
             # corner done: advance index, plan next arc, back to DRIVE (no stop)
             self.corner_count += 1
+            # the straight's acceleration ramp continues from the exit speed
+            self.exit_v = getattr(self, 'turn_v_cmd', self.v_turn)
             self.get_logger().info(
                 f"TURN done corner {self.corner_count} (theta={math.degrees(theta):.1f}, "
                 f"target={math.degrees(self.arc['theta_target']):.1f}).")
@@ -4817,7 +5096,7 @@ class Round1Controller(Node):
                 f"[TURN idx{self.corner_idx}] pos=({x:+.2f},{y:+.2f}) th={math.degrees(theta):+.1f} "
                 f"distC-R={e_ct:+.3f} th_err={math.degrees(theta_err):+.1f} blend={blend:.2f} om={omega:+.2f}",
                 throttle_duration_sec=0.2)
-        self.publish_cmd(self.v_turn, omega)
+        self.publish_cmd(v_cmd, omega)
 
     # ------------------------------------------------------------- Stanley
     def _stanley_follow_path(self, x, y, theta, path_xy):
@@ -4945,6 +5224,7 @@ class Round1Controller(Node):
         # cross-track: real v in the denominator keeps the closed loop
         # speed-independent (e_ct decays with time constant 1/k_stanley).
         v_gain = self.stanley_v_ref if self.stanley_v_ref > 1e-3 else v
+        v_gain = max(v_gain, self.stanley_ct_v_min)
 
         # heading: scale k_heading ~ 1/v so the heading loop's time constant
         # L/(v*k_h_eff) stays constant. 0 -> no scaling.
@@ -4988,6 +5268,38 @@ def _park_test_scan_args(argv):
     return args
 
 
+def _argv_params(argv):
+    vals = {}
+    for a in argv:
+        if ':=' in a:
+            k, v = a.split(':=', 1)
+            vals[k.strip()] = v.strip()
+    return vals
+
+
+def _require_button(argv):
+    return _argv_params(argv).get('require_button', '').lower() in ('true', '1')
+
+
+def _scan_args(argv):
+    """Arguments for the restarted scan_processor, from our own command line
+    (the restart happens before the node and its parameters exist).
+
+    race_mode and start_from_bay follow THIS controller, not the mode the
+    container was started in -- otherwise an open run in an obstacle
+    container waits for a bay that does not exist. With require_button the
+    scan_processor measures nothing before the press (wait_for_button)."""
+    vals = _argv_params(argv)
+    race_mode = 'open' if vals.get('race_mode', '').lower() == 'open' else 'obstacle'
+    unpark = vals.get('unpark', '').lower() in ('true', '1')
+    args = '-p race_mode:=%s -p start_from_bay:=%s' % (
+        race_mode, 'true' if unpark and race_mode == 'obstacle' else 'false')
+    if _require_button(argv):
+        args += ' -p wait_for_button:=true'
+    park = _park_test_scan_args(argv)
+    return args + (' ' + park if park else '')
+
+
 def _second_controller_running(wait_s=1.5):
     """Is a round1_controller already running? Then this one does not drive off.
     Two controllers both send /cmd_vel and steering; on top of that the old
@@ -5020,7 +5332,8 @@ def main(args=None):
         sys.exit(1)
     # Restart EKF and scan_processor fresh before our own latched subscriptions
     # come into being -- the map hangs on the start pose (ekf/estimation_restart.py).
-    restart_estimation('round1_controller', scan_args=_park_test_scan_args(sys.argv))
+    restart_estimation('round1_controller', scan_args=_scan_args(sys.argv),
+                       after_button=_require_button(sys.argv))
     node = Round1Controller()
     try:
         rclpy.spin(node)
