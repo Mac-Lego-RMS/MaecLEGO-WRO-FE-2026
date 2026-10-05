@@ -33,11 +33,17 @@ class SteerLUT:
         self.wheelbase = wheelbase_fallback
         self._speeds = []          # sorted list of v
         self._tab = {}             # v -> dict(dmin,dmax,servos[N_DELTA]) per side
+        self.centres = {}          # v -> measured straight-ahead servo (if in the JSON)
         try:
             self._load(json_path)
             self.ok = True
+            # The straight-ahead servo is the 0-deg point of both side tables:
+            # omega = 0 sends exactly that value.
+            centre = (', '.join(f"{v:.2f} m/s {c:+.3f}" for v, c in sorted(self.centres.items()))
+                      if self.centres else "not measured in this JSON")
             self._info(f"SteerLUT loaded: {len(self._speeds)} speeds "
-                       f"{[round(v,2) for v in self._speeds]}, L={self.wheelbase}")
+                       f"{[round(v,2) for v in self._speeds]}, L={self.wheelbase}, "
+                       f"straight-ahead servo: {centre}")
         except Exception as e:
             self._warn(f"SteerLUT could not load {json_path} ({e}). "
                        f"Fallback: linear fallback curve.")
@@ -55,6 +61,8 @@ class SteerLUT:
             raise ValueError("no speeds in JSON")
         for entry in speeds:
             v = float(entry["v"])
+            if entry.get("centre_measured") and "centre" in entry:
+                self.centres[v] = float(entry["centre"])
             left = sorted([(float(s), float(d)) for s, d in entry["left"]],  key=lambda p: p[1])
             right = sorted([(float(s), float(d)) for s, d in entry["right"]], key=lambda p: p[1])
             self._tab[v] = {
