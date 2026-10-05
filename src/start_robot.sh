@@ -62,6 +62,26 @@ esp_led() {   # esp_led R G B W
 esp_led 255 0 0 0      # red
 
 # ------------------------------------------------------------------ #
+# 0b. SSD read errors -- early warning
+# 05.10.2026: the NVMe had unreadable sectors (kernel "critical medium
+# error"); one sat in libnvjpeg.so and silently broke the Argus camera
+# plugin, another in libGLX_nvidia.so.0. Both repaired by reinstalling the
+# package. New ones should show up HERE, not as a strange crash later.
+# Reading the kernel log needs the adm group (macjetson has it).
+# ------------------------------------------------------------------ #
+DISK_ERR=$(journalctl -k -b --no-pager 2>/dev/null | grep -E "critical medium error|I/O error, dev nvme" \
+           | grep -o "sector [0-9]*" | sort -u)
+if [ -n "$DISK_ERR" ]; then
+    echo "!!! WARNING: the SSD reported read errors in this boot:"
+    echo "$DISK_ERR" | sed 's/^/!!!   /'
+    echo "!!! Find the affected file (block = (sector - start of nvme0n1p1) / 8):"
+    echo "!!!   cat /sys/block/nvme0n1/nvme0n1p1/start"
+    echo "!!!   sudo debugfs -R \"icheck <block>\" /dev/nvme0n1p1   then  ncheck <inode>"
+    echo "!!! and reinstall its package (dpkg -S <file>)."
+    echo "$(date '+%F %T') $(echo $DISK_ERR | tr '\n' ' ')" >> "$WORKSPACE/.disk_errors.log"
+fi
+
+# ------------------------------------------------------------------ #
 # Configuration
 # ------------------------------------------------------------------ #
 CONTAINER=yolo_dev
