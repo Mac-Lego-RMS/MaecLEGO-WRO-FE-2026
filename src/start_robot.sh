@@ -78,7 +78,7 @@ if [ -n "$DISK_ERR" ]; then
     echo "!!!   cat /sys/block/nvme0n1/nvme0n1p1/start"
     echo "!!!   sudo debugfs -R \"icheck <block>\" /dev/nvme0n1p1   then  ncheck <inode>"
     echo "!!! and reinstall its package (dpkg -S <file>)."
-    echo "$(date '+%F %T') $(echo $DISK_ERR | tr '\n' ' ')" >> "$WORKSPACE/.disk_errors.log"
+    echo "$(date '+%F %T') $(echo $DISK_ERR | tr '\n' ' ')" >> "${WORKSPACE:-$HOME/ros2_ws}/.disk_errors.log"
 fi
 
 # ------------------------------------------------------------------ #
