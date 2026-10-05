@@ -134,6 +134,13 @@ detected pillars and the run clock. It also forwards the Jetson's load and
 temperatures. Nothing on the vehicle depends on it; it exists only to be looked
 at.
 
+One layout shows a run at a glance: the camera with the colour of every LiDAR
+point, the overlay, the diagnostics, the ESP link, the battery, the
+race state (direction, lap, corner) and the log. Further tabs group the plots
+for control, drive, localisation, geometry and the system.
+
+![The Foxglove layout replaying run `parken_test_4`. Left: the fisheye image with the calibrated LiDAR zone and the colour count of the current scan (33 red, 2 190 black, 113 unknown points), below it the unwrapped panorama. Middle: the field overlay. Right: diagnostics, here reporting a saturated CPU core and the Jetson temperature, the ESP link and the battery. Bottom: race state and log.](../figures/foxglove_layout_camera_run.png)
+
 **From the recording.** The `/viz` topics of the overlay are recorded with every
 run, so the same view can be replayed and stepped through. A `.db3` recording
 does not contain its message definitions, and Foxglove's built-in definition of
@@ -147,11 +154,11 @@ pip install rosbags
 python3 docs/analysis/bag_to_mcap.py ~/runs/cw_pos1_22   # -> ~/runs/cw_pos1_22_mcap/
 ```
 
-![Replay of run `cw_pos1_22` (obstacle challenge, clockwise) in Foxglove: the outer and inner walls as measured, with their normals; the path of all three laps in yellow; the detected pillars in red and green; the vehicle at the end of the run.](../figures/foxglove_3d_obstacle.png)
+![Replay of run `cw_pos1_22` (obstacle challenge, clockwise): the outer and inner walls as measured, with their normals; the driven path in yellow; the detected pillars in red and green; the vehicle with the LiDAR points of the current scan, coloured by the camera (grey: black wall, red and green: pillar).](../figures/foxglove_3d_obstacle.png)
 
-<!-- TODO figures: open challenge replay; camera and coloured LiDAR points
-(parken_test_4); Jetson load of the last obstacle run (parken_test_49).
-TODO: export the Foxglove layouts to setup/foxglove/ and link them here. -->
+<!-- TODO figures: open challenge replay; Jetson load of the last obstacle run
+(parken_test_49). TODO: export the Foxglove layouts to setup/foxglove/ and link
+them here (the layout is called wro_overlay_layout). -->
 
 The replay answers the questions a number cannot: where the vehicle lost a wall,
 which pillar was seen from where, what the controller saw when it braked. The
@@ -159,8 +166,8 @@ numbers themselves then come from the scripts in
 [`docs/analysis/`](../analysis), over all runs at once
 ([chapter 3](04-software.md)).
 
-**A fault that was in every recording.** Plotted over a run, the reported pack
-voltage is a flat line at 17.52 V, 4.38 V per cell. That is impossible twice: a
+**A fault that was in every recording.** Plotted over a run (bottom of the
+figure below), the reported pack voltage is a flat line at 17.52 V, 4.38 V per cell. That is impossible twice: a
 full LiPo cell has 4.2 V, and under load the voltage has to fall. The table of
 all runs ([`data/runs.csv`](../data/runs.csv)) shows the same value as the
 minimum voltage of all 73 recorded runs between 11 and 29 September. The reading
@@ -171,7 +178,7 @@ was a failed resistor in the voltage divider
 A plausible value is not proof of a working sensor; a signal that never moves is
 the warning sign.
 
-![Foxglove plot of the reported pack voltage over run `parken_test_49` (detail): a flat line at 17.52 V for the whole run; the legend shows 4.38 V per cell.](../figures/foxglove_battery_flat.png)
+![The system tab replaying run `parken_test_4`. Top: the ESP link's own diagnostics. Middle: latency of the link, a few milliseconds with single peaks, and the clock drift between ESP and Jetson, re-estimated in steps. Bottom: the reported battery voltage, a flat line at 17.52 V (4.38 V per cell) through the whole run.](../figures/foxglove_system_tab.png)
 
 ## Versions
 
