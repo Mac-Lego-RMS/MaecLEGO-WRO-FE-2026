@@ -33,6 +33,7 @@ setup(
             'lidar_pixel_mapper = camera_lidar_fusion.lidar_pixel_mapper:main',
             'rotation_calibration = camera_lidar_fusion.rotation_calibration:main',
             'camera_exposure_calib = camera_lidar_fusion.camera_exposure_calib:main',
+            'csi_camera = camera_lidar_fusion.csi_camera:main',
         ],
     },
 )

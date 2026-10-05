@@ -6,19 +6,28 @@
 #   tmux attach -t robot_session     # look inside
 #   Ctrl-b n / Ctrl-b <number>       # switch windows
 #   ./start_robot.sh --calib         # also the camera calibration
+#   ./start_robot.sh --open          # open challenge (no pylons, no bay)
+#   ./start_robot.sh --obstacle      # obstacle challenge
+#
+# Without --open/--obstacle the mode comes from config/race.env (RACE=open or
+# RACE=obstacle) -- that is what robot.service uses at boot. See RACE_FILE below.
 #
 # Windows: 0 lidar  1 imu  2 esp  3 camera  4 foxglove  5 overlay
 #          7 fusion  8 ekf  9 scan   [10 calib, only with --calib]
-#          6 round1 -- the command is ready there, but only drives off
-#                      when you press Enter there.  Ctrl-b 6
+#          11 restart watchdog  12 camera watchdog (not in the open challenge)
+#          6 round1 -- with AUTOSTART=true it runs at once and waits for the
+#                      start button; otherwise the command is ready there and
+#                      runs when you press Enter.  Ctrl-b 6
 #
 # Ctrl-b <digit> only takes ONE digit -- that is why the controller has a
 # single-digit number. The window list is at Ctrl-b w.
 #
 # Status LEDs on the ESP (all LEDs of the SK6812 chain):
 #   red     this script is running, robot is booting
-#   yellow  everything started, the controller in window 6 is not running yet
-#   green   round1_controller is running -- it sets that itself
+#   yellow  everything started, the controller in window 6 is not ready yet
+#           (not started, or with AUTOSTART still restarting EKF/scan)
+#   green   round1_controller is ready and waits for the START BUTTON -- it
+#           sets that itself, after gyro and LiDAR are up
 
 set -u
 
@@ -111,6 +120,15 @@ CAM_RESOURCE=v4l2://$CAM_NODE
 CAM_WIDTH=1280
 CAM_HEIGHT=960
 CAM_FPS=15.0
+
+# CSI camera (CAMERA=csi): fixed Argus values. Exposure in ms (at 15 Hz up to
+# 66), analog gain 1..16, white balance 1 = auto and locked after 3 s
+# (5 = daylight, 0 = off). STARTING values for the new IMX219 -- calibrate at
+# the field. Doubles written as doubles (ROS parameter types).
+CSI_EXPOSURE_MS=20.0
+CSI_GAIN=2.0
+CSI_WBMODE=1
+CSI_SATURATION=1.0
 
 # Exposure of the fisheye camera. exposure_time_absolute counts in 100 us
 # steps, so 500 is 50 ms. Must fit under the frame period, otherwise
@@ -277,6 +295,11 @@ N_CORNERS=12
 PACE=fast
 PACE_LAP1=same
 
+# Pace profile for the open challenge (./start_robot.sh --open): open_slow |
+# open_medium | open_fast (v_drive / v_turn 0.55/0.45, 0.75/0.55, 1.20/0.80 m/s)
+# or one of the above. Replaces PACE there; lap 1 always the same (no scan lap).
+OPEN_PACE=open_fast
+
 # Does the robot start in the parking bay?
 #
 # ONE switch for two nodes, on purpose: it sets the controller to
@@ -295,9 +318,97 @@ PACE_LAP1=same
 # (start_from_bay, see window 9); the switch now sets that.
 UNPARK=true
 
+# Which challenge, for the boot (robot.service starts this script without
+# arguments). One file, two keys:
+#     RACE=open          open | obstacle
+#     AUTOSTART=true     round1 runs at once in window 6 and waits for the
+#                        start button -- no laptop needed at the field
+# The file is local to the robot (not in git). Missing file or key:
+# obstacle, AUTOSTART=false (the command only waits in window 6).
+# --open / --obstacle on the command line beat the file.
+RACE_FILE="$WORKSPACE/config/race.env"
+RACE=obstacle
+AUTOSTART=false
+# Camera: csi (IMX219 on the ribbon cable, hardware pipeline -- default since
+# 05.10.2026, the USB 360 camera broke), usb (old UVC camera) or none.
+CAMERA=csi
+if [ -f "$RACE_FILE" ]; then
+    _cam=$(sed -n 's/^[[:space:]]*CAMERA[[:space:]]*=[[:space:]]*\([A-Za-z]*\).*/\1/p' "$RACE_FILE" | tail -1)
+    case "$_cam" in
+        csi|usb|none) CAMERA=$_cam ;;
+        "") ;;
+        *) echo "WARNING: $RACE_FILE: CAMERA=$_cam unknown (csi | usb | none) -- csi." ;;
+    esac
+    _race=$(sed -n 's/^[[:space:]]*RACE[[:space:]]*=[[:space:]]*\([A-Za-z]*\).*/\1/p' "$RACE_FILE" | tail -1)
+    _auto=$(sed -n 's/^[[:space:]]*AUTOSTART[[:space:]]*=[[:space:]]*\([A-Za-z]*\).*/\1/p' "$RACE_FILE" | tail -1)
+    case "$_race" in
+        open|obstacle) RACE=$_race ;;
+        "") ;;
+        *) echo "WARNING: $RACE_FILE: RACE=$_race unknown (open | obstacle) -- obstacle." ;;
+    esac
+    [ "$_auto" = "true" ] && AUTOSTART=true
+fi
+
 # Calibration node only on request (--calib). Not needed in a normal run.
+# --open: open challenge. Overrides RACE_MODE and UNPARK above and prepares
+# the round1 line in window 6 for it (see OPEN_ARGS below).
 START_CALIB=0
-[ "${1:-}" = "--calib" ] && START_CALIB=1
+for arg in "$@"; do
+    case "$arg" in
+        --calib)    START_CALIB=1 ;;
+        --open)     RACE=open ;;
+        --obstacle) RACE=obstacle ;;
+        *) echo "Unknown option: $arg (known: --calib, --open, --obstacle)"; exit 1 ;;
+    esac
+done
+OPEN_RACE=0
+[ "$RACE" = "open" ] && OPEN_RACE=1
+echo "=== Mode: $RACE challenge, round1 $([ "$AUTOSTART" = true ] && echo 'starts by itself and waits for the button' || echo 'waits for Enter in window 6') ==="
+if [ "$OPEN_RACE" -eq 1 ]; then
+    RACE_MODE=open
+    UNPARK=false
+    PACE=$OPEN_PACE
+    PACE_LAP1=same
+fi
+
+# Camera and lidar-camera fusion (windows 3 and 7) only where colour is used:
+# in the open challenge the scan_processor drops the coloured scan right away
+# (no pylons). Saves about half a core (fusion ~34 %, video_source ~16 %) and
+# the 5 s exposure wait at start-up. --calib needs the camera, so it keeps it.
+CAMERA_ON=1
+[ "$OPEN_RACE" -eq 1 ] && [ "$START_CALIB" -eq 0 ] && CAMERA_ON=0
+[ "$CAMERA" = "none" ] && CAMERA_ON=0
+
+# Open challenge, extra arguments for round1:
+#   scan_pause:=0.0, scan_lookahead_halt_front:=0.0  -- no pylons, so no scan
+#       halts in lap 1 (they would cost ~11 s)
+#   racing_line:=1.0  -- without pylons drive the inner line (width minus
+#       inner_clearance 0.25 m) instead of the lane centre (video_bag_2)
+#   race_mode:=open  -- read by estimation_restart: there is no corner
+#       geometry before the first corner in this mode, so it only waits for
+#       gyro and the start pose (/front_wall_x)
+# The three numbers MUST be written as doubles (0.0 / 1.0): the controller
+# declares them as double, and ROS 2 rejects :=0 / :=1 as integers -- the
+# node then does not start at all.
+#   finish_front_dist:=1.9  -- stop right behind the finish line 2 m from the
+#       front wall (base_link 1.90 m = rear 6 cm past the line)
+#   turn_exit_accel_deg:=30.0  -- accelerate from 30 deg before the end of
+#       every corner (not the last one)
+#   inner_clearance:=0.30  -- racing line 0.30 m from the inner wall instead of
+#       0.25. With R 0.5 the arc cuts towards the inner corner: planned body
+#       gap 9 cm at 0.25, but the robot runs 5-9 cm inside the arc --
+#       open_test_12/13 touched the inner corner of the first corner in
+#       almost every lap (0-1 cm). At 0.30: planned 16 cm. In the narrow
+#       lanes (0.57 m) that is about the lane centre anyway.
+#   o_in_list / o_out_list 0.28  -- lap 1, before the inner walls are known:
+#       0.28 m from the OUTER wall instead of 0.35. In a 0.57 m lane 0.35 is
+#       only 0.22 m from the inner wall -- tighter than the racing line.
+#   stanley_ct_v_min:=0.6  -- gentle cross-track correction at low speed: the
+#       start swung to -30 deg (full lock at 0.35 m/s) and reached the first
+#       corner still oscillating (open_test_12)
+OPEN_ARGS="-p race_mode:=open -p scan_pause:=0.0 -p scan_lookahead_halt_front:=0.0 -p racing_line:=1.0 -p finish_front_dist:=1.9 -p turn_exit_accel_deg:=30.0 -p inner_clearance:=0.30 -p o_in_list:=[0.28,0.28,0.28,0.28] -p o_out_list:=[0.28,0.28,0.28,0.28] -p stanley_ct_v_min:=0.6"
+ROUND1_EXTRA=""
+[ "$OPEN_RACE" -eq 1 ] && ROUND1_EXTRA=" $OPEN_ARGS"
 
 # Colour of the calibration pylon: red, green or magenta. Without this setting
 # the node takes the largest colour blob in the image -- and in a furnished room
@@ -364,33 +475,23 @@ docker rm -f "$CONTAINER" 2>/dev/null
 tmux kill-session -t "$SESSION" 2>/dev/null
 
 # ------------------------------------------------------------------ #
-# 2b. Wait for the system clock
-# Without a valid RTC time the Jetson starts in 1970. If the clock then jumps
-# 56 years forward via NTP in the middle of operation, the Foxglove timeline
-# is torn apart: the panels show nothing any more, although every topic
-# publishes fine. So first the time, then the nodes.
-# Do not wait forever: without a network (competition) no NTP sync ever comes,
-# and the robot has to drive anyway.
+# 2b. System clock -- NOT waited for any more
+# Driving only uses time differences, the date does not matter. Waiting for
+# NTP cost 25-30 s on every boot, and without a network (competition) no
+# sync ever comes. The only risk is a JUMP of the clock while nodes run: the
+# RTC does not keep the time, so the clock starts at the last shutdown and
+# NTP (if there is a network) moves it forward hours later. That tears the
+# Foxglove timeline and confuses the ESP clock sync for a few seconds. The EKF
+# and scan_processor are restarted by round1 before every run anyway. So: in
+# the lab, if this says "not synced yet", let ~10 s pass before the first run;
+# in the competition (no network) there is no jump.
 # ------------------------------------------------------------------ #
-synced() { [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = "yes" ]; }
-
-if synced; then
+if [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = "yes" ]; then
     echo "Clock synced: $(date '+%F %T')."
 else
-    echo -n "Waiting for time sync"
-    for _ in $(seq 30); do
-        synced && break
-        echo -n "."
-        sleep 1
-    done
-    if synced; then
-        echo " -- clock is at $(date '+%F %T')."
-    else
-        echo
-        echo "NOTE: no NTP sync, system time is $(date '+%F %T')."
-        echo "  If the clock jumps later, reconnect Foxglove and restart this"
-        echo "  stack -- otherwise the panels stay empty."
-    fi
+    echo "Clock not synced yet ($(date '+%F %T')) -- not waiting. With a network NTP"
+    echo "  may still move it forward: then reconnect Foxglove; before the first run"
+    echo "  give the nodes ~10 s (the ESP clock sync settles)."
 fi
 
 # ------------------------------------------------------------------ #
@@ -402,11 +503,30 @@ fi
 # Docker creates it as a DIRECTORY; in the image it is a file, though, and the
 # container does not start ("not a directory"). An empty file is enough:
 # with v4l2:// Argus is not needed.
+#
+# CSI camera: here the socket is REAL -- nvargus-daemon creates it, and the
+# camera node in the container talks to the ISP through it. Then do not
+# create a file, wait for the socket instead. A leftover empty file from USB
+# times blocks the daemon: remove it, the daemon must then be restarted (sudo).
 if [ -d /tmp/argus_socket ]; then
     echo "ERROR: /tmp/argus_socket is a directory (left over from a failed"
     echo "  start, owned by root). Remove it once, then restart:"
     echo "    sudo rm -rf /tmp/argus_socket && sudo systemctl restart robot.service"
     exit 1
+fi
+if [ "$CAMERA" = "csi" ] && [ "$CAMERA_ON" -eq 1 ]; then
+    if [ -f /tmp/argus_socket ] && [ ! -S /tmp/argus_socket ]; then
+        rm -f /tmp/argus_socket 2>/dev/null
+        echo "NOTE: removed the empty /tmp/argus_socket (USB workaround). The"
+        echo "  Argus daemon has to create the real one:  sudo systemctl restart nvargus-daemon"
+    fi
+    for _ in $(seq 20); do [ -S /tmp/argus_socket ] && break; sleep 0.5; done
+    if [ ! -S /tmp/argus_socket ]; then
+        echo "WARNING: no Argus socket -- nvargus-daemon is not running, the CSI camera"
+        echo "  will not deliver images. Camera connected and enabled (jetson-io)?"
+        echo "    systemctl status nvargus-daemon"
+        touch /tmp/argus_socket      # so that the container still starts
+    fi
 elif [ ! -e /tmp/argus_socket ]; then
     touch /tmp/argus_socket
 fi
@@ -466,8 +586,16 @@ else
     echo '  otherwise the /jtop/* topics stay off (the rest runs normally).'
 fi
 
-# Give the hardware time to initialise
-sleep 10
+# Hardware: wait until the device nodes are there (LiDAR on USB, ESP on the
+# UART, IMU on I2C bus 7) instead of 10 s blind -- after boot they normally
+# exist at once. At most 10 s, then start anyway (the window shows the error).
+for _ in $(seq 20); do
+    [ -e /dev/rplidar ] && [ -e /dev/ttyTHS1 ] && [ -e /dev/i2c-7 ] && break
+    sleep 0.5
+done
+for dev in /dev/rplidar /dev/ttyTHS1 /dev/i2c-7; do
+    [ -e "$dev" ] || echo "NOTE: $dev is missing -- check the cable; its node will fail."
+done
 
 # ------------------------------------------------------------------ #
 # 4. Start the virtual terminals (tmux)
@@ -483,6 +611,20 @@ run_window 1 imu "ros2 run bno055 bno055 --ros-args --params-file /workspace/bno
 # Window 2: ESP serial
 run_window 2 esp "ros2 run esp_bridge esp_serial_bridge"
 
+if [ "$CAMERA_ON" -eq 1 ] && [ "$CAMERA" = "csi" ]; then
+# Window 3: CSI camera (IMX219-200, 200 deg fisheye) through the Jetson's ISP
+# and VIC -- no MJPEG decoding on the CPU any more. Exposure, gain and white
+# balance are fixed in the Argus pipeline itself (camera_lidar_fusion/csi_camera.py);
+# no v4l2-ctl and no USB watchdog needed. The node restarts its pipeline on
+# errors by itself.
+run_window 3 camera \
+    "ros2 run camera_lidar_fusion csi_camera --ros-args -p width:=$CAM_WIDTH -p height:=$CAM_HEIGHT -p framerate:=$CAM_FPS -p exposure_ms:=$CSI_EXPOSURE_MS -p gain:=$CSI_GAIN -p wbmode:=$CSI_WBMODE -p saturation:=$CSI_SATURATION"
+echo "Camera: CSI (Argus), exposure $CSI_EXPOSURE_MS ms, gain $CSI_GAIN, wbmode $CSI_WBMODE."
+if grep -q "Samples, 2026-09" "$WORKSPACE/config/fisheye_calib.yaml" 2>/dev/null; then
+    echo "NOTE: config/fisheye_calib.yaml is still from the old USB camera -- calibrate"
+    echo "  the CSI camera (centre, radius, rotation, zone) before relying on colours."
+fi
+elif [ "$CAMERA_ON" -eq 1 ]; then
 # Window 3: camera (USB UVC, 360-degree fisheye)
 run_window 3 camera \
     "/workspace/install/ros_deep_learning/lib/ros_deep_learning/video_source --ros-args -p resource:=$CAM_RESOURCE -p width:=$CAM_WIDTH -p height:=$CAM_HEIGHT -p framerate:=$CAM_FPS"
@@ -551,6 +693,30 @@ else
     echo "  The image edge then goes dark and the colour detection finds no pylons."
 fi
 
+# Window 12: camera watchdog (on the Jetson). The camera drops off the USB bus
+# now and then; afterwards video_source only logs "failed to capture next
+# frame" and the camera is back on auto exposure. The watchdog restarts
+# window 3 (with a USB reset if the camera hangs) and sets the values above
+# again -- see src/camera_watchdog.sh. It reads them from this file:
+{
+    echo "CAM_DEV=$CAM_DEV"
+    echo "CAM_WIDTH=$CAM_WIDTH"
+    echo "CAM_HEIGHT=$CAM_HEIGHT"
+    echo "CAM_FPS=$CAM_FPS"
+    echo "CAM_EXPOSURE=$CAM_EXPOSURE"
+    echo "CAM_SATURATION=$CAM_SATURATION"
+    echo "CAM_GAIN=$CAM_GAIN"
+    echo "CAM_WB_TEMP=$CAM_WB_TEMP"
+    printf 'ROS_SETUP=%q\n' "$ROS_SETUP"
+} > "$WORKSPACE/.camera.env"
+tmux new-window -d -t "$SESSION:12" -n camwatch
+tmux send-keys -t "$SESSION:12" \
+    "WORKSPACE=$WORKSPACE SESSION=$SESSION CONTAINER=$CONTAINER $WORKSPACE/src/camera_watchdog.sh" C-m
+else
+    echo "Camera off (open challenge or CAMERA=none in config/race.env): windows 3 and 7"
+    echo "  (camera, fusion) not started -- no pylon colours."
+fi
+
 # Window 4: Foxglove
 run_window 4 foxglove "ros2 run foxglove_bridge foxglove_bridge"
 run_window 5 foxglove "ros2 run ekf foxglove_overlay"
@@ -572,7 +738,7 @@ run_window 5 foxglove "ros2 run ekf foxglove_overlay"
 #
 # CSV on demand:  ros2 topic pub --once /camera_lidar/capture std_msgs/msg/Empty {}
 # Display off:    ros2 param set /lidar_pixel_mapper debug false
-run_window 7 fusion \
+[ "$CAMERA_ON" -eq 1 ] && run_window 7 fusion \
     "sleep 8 && ros2 run camera_lidar_fusion lidar_pixel_mapper --ros-args \
        -p scan_topic:=$SCAN_TOPIC \
        -p zone_from_band:=false \
@@ -616,29 +782,44 @@ fi
 # second node ran here next to one started by hand -- in
 # parken_test_14 it re-latched a map rotated by 8 deg in the middle of the
 # first corner. So: do NOT start another one by hand.
+# wait_for_button also here: this boot instance must not measure either --
+# round1 replaces it with its own restart anyway.
 RACE_MODE=$RACE_MODE UNPARK=$UNPARK SESSION=$SESSION CONTAINER=$CONTAINER \
-    "$WORKSPACE/src/estimation_restart.sh" --delay 10 --no-wait
-
-# ------------------------------------------------------------------ #
-# Window 6: the controller -- prepared, but NOT started
-# ------------------------------------------------------------------ #
-# The round1_controller drives off as soon as it has inputs. That is why
-# its command only sits ready in the line here: check that the robot
-# is placed correctly, then Enter. Single-digit window number, so that
-# Ctrl-b 6 gets you there.
-#
-# At start-up the controller has EKF and scan_processor restarted itself
-# (ekf/estimation_restart.py, through the watchdog in window 11) and waits
-# until gyro and bay detection are up.
-arm_window 6 round1 \
-    "ros2 run ekf round1_controller --ros-args -p n_corners:=$N_CORNERS -p unpark:=$UNPARK -p pace:=$PACE -p pace_lap1:=$PACE_LAP1"
+    SCAN_EXTRA="-p wait_for_button:=true" \
+    "$WORKSPACE/src/estimation_restart.sh" --delay 3 --no-wait
 
 # Window 11: restart watchdog, on the Jetson (not in the container). Carries out
 # the restart requests of round1_controller and unpark_variants_node
 # -- they restart windows 8/9, and the container cannot reach tmux.
+# BEFORE window 6: the watchdog clears old requests when it starts, an
+# autostarted controller must not be faster.
 tmux new-window -d -t "$SESSION:11" -n restart
 tmux send-keys -t "$SESSION:11" \
     "WORKSPACE=$WORKSPACE RACE_MODE=$RACE_MODE UNPARK=$UNPARK SESSION=$SESSION CONTAINER=$CONTAINER $WORKSPACE/src/estimation_watchdog.sh" C-m
+sleep 1
+
+# ------------------------------------------------------------------ #
+# Window 6: the controller
+# ------------------------------------------------------------------ #
+# require_button:=true in BOTH challenges: the rules start the robot with ONE
+# button press, and before it nothing may be measured. The controller has
+# EKF and scan_processor restarted (ekf/estimation_restart.py, through the
+# watchdog in window 11) with wait_for_button, waits for gyro and LiDAR, and
+# then for the button. Start pose, map, direction and the pylons of the start
+# straight are measured only after the press (~0.5 s, from the bay plus the
+# 2 s start scan).
+#
+# AUTOSTART=true (config/race.env): the command runs at once -- the robot
+# stands still until the button. Up to 3 attempts if it does not get ready
+# (e.g. gyro not yet ok right after boot). Otherwise the command only sits
+# ready in the line: Ctrl-b 6, check, Enter.
+ROUND1_CMD="ros2 run ekf round1_controller --ros-args -p n_corners:=$N_CORNERS -p unpark:=$UNPARK -p pace:=$PACE -p pace_lap1:=$PACE_LAP1 -p require_button:=true$ROUND1_EXTRA"
+if [ "$AUTOSTART" = "true" ]; then
+    run_window 6 round1 \
+        "for i in 1 2 3; do $ROUND1_CMD && break; echo \"round1 not ready (attempt \$i of 3) -- again in 3 s\"; sleep 3; done"
+else
+    arm_window 6 round1 "$ROUND1_CMD"
+fi
 
 # ------------------------------------------------------------------ #
 # Optional driving nodes -- uncomment when needed
@@ -646,15 +827,20 @@ tmux send-keys -t "$SESSION:11" \
 #run_window 7 obstacle "ros2 run robot_vision obstacle_run"
 #run_window 7 wallfollower "ros2 run wall_follower_robot wall_follower_logic"
 
-# Status LEDs yellow: stack is up, waiting for Enter in window 6.
+# Status LEDs yellow: stack is up. Without AUTOSTART it waits for Enter in
+# window 6; with it the controller turns them green once it is ready.
 esp_led 255 160 0 0    # yellow
 
 echo
 echo "Everything started. Look inside with:  tmux attach -t $SESSION"
 echo
-echo "Window 6 (round1) holds the controller command ready, it has NOT been"
-echo "run. To drive off:  tmux attach -t $SESSION, then Ctrl-b 6,"
-echo "check, Enter.  (Ctrl-b w shows all windows.)"
+if [ "$AUTOSTART" = "true" ]; then
+    echo "Window 6 (round1) runs ($RACE challenge) and waits for the START BUTTON."
+else
+    echo "Window 6 (round1, $RACE challenge) holds the controller command ready, it"
+    echo "has NOT been run. tmux attach -t $SESSION, Ctrl-b 6, check, Enter --"
+    echo "then it waits for the START BUTTON.  (Ctrl-b w shows all windows.)"
+fi
 echo
 echo "Stopping from outside:"
 echo "  ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist \"{linear: {x: 0.0}, angular: {z: 0.0}}\""
