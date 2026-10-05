@@ -14,7 +14,8 @@
 #
 # Windows: 0 lidar  1 imu  2 esp  3 camera  4 foxglove  5 overlay
 #          7 fusion  8 ekf  9 scan   [10 calib, only with --calib]
-#          11 restart watchdog  12 camera watchdog (not in the open challenge)
+#          11 restart watchdog  12 camera watchdog (USB camera only)
+#          13 LiDAR watchdog
 #          6 round1 -- with AUTOSTART=true it runs at once and waits for the
 #                      start button; otherwise the command is ready there and
 #                      runs when you press Enter.  Ctrl-b 6
@@ -816,6 +817,14 @@ RACE_MODE=$RACE_MODE UNPARK=$UNPARK SESSION=$SESSION CONTAINER=$CONTAINER \
 tmux new-window -d -t "$SESSION:11" -n restart
 tmux send-keys -t "$SESSION:11" \
     "WORKSPACE=$WORKSPACE RACE_MODE=$RACE_MODE UNPARK=$UNPARK SESSION=$SESSION CONTAINER=$CONTAINER $WORKSPACE/src/estimation_watchdog.sh" C-m
+
+# Window 13: LiDAR watchdog (on the Jetson). After a USB reconnect the LiDAR
+# node keeps the dead device and publishes nothing, without an error
+# (05.10.2026). The watchdog restarts window 0 then, and when no scan came
+# for 3 s -- see src/lidar_watchdog.sh.
+tmux new-window -d -t "$SESSION:13" -n lidarwatch
+tmux send-keys -t "$SESSION:13" \
+    "WORKSPACE=$WORKSPACE SESSION=$SESSION CONTAINER=$CONTAINER $WORKSPACE/src/lidar_watchdog.sh" C-m
 sleep 1
 
 # ------------------------------------------------------------------ #
