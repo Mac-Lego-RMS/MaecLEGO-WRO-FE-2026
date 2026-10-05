@@ -5296,6 +5296,10 @@ def _scan_args(argv):
         race_mode, 'true' if unpark and race_mode == 'obstacle' else 'false')
     if _require_button(argv):
         args += ' -p wait_for_button:=true'
+    # test without camera: simulated pylons, e.g. sim_obstacles:=start:entry:green
+    sim = ''.join(ch for ch in vals.get('sim_obstacles', '') if ch.isalnum() or ch in ':+')
+    if sim:
+        args += ' -p sim_obstacles:=' + sim
     park = _park_test_scan_args(argv)
     return args + (' ' + park if park else '')
 

@@ -68,7 +68,7 @@ from ekf.wall_extraction import (
 from ekf.field_map import (
     generate_map, start_map_3wall, outer_box_map, outer_walls_map,
     inner_walls_map, inner_band_from_widths, obstacle_seats_map,
-    seat_group_to_wall_index, START_POSES_CW, START_POSES_CCW,
+    seat_group_to_wall_index, START_POSES_CW, START_POSES_CCW, SEAT_INNER_INSET,
 )
 from ekf.start_detection import detect_start_obstacle, detect_start_open
 
@@ -167,6 +167,9 @@ FRONT_MIN_LEN = 0.50           # front wall is 3 m long, the bay wall 0.20 m
 FRONT_MIN_DIST = 0.60          # the bay is never right at the corner
 INNER_END_FREE = 0.30          # beams past the inner wall end must reach this much further
 BAY_VOTES_INNER_END = 11       # votes (median) when the front comes from the inner wall end
+BAY_SIDE_MIN_LEN = 0.15        # shorter pieces are no wall for the side test (pylon 5 cm)
+PYLON_MAX_EXTENT = 0.08        # a pylon cluster is at most this large
+PYLON_HALF = 0.025             # seen face -> centre of the 5 cm pylon
 
 # Mask the parking bay out of the wall extraction. The bay walls are not in the
 # wall model, and in the last corner the path goes right past them: in one run
@@ -297,6 +300,15 @@ class ScanProcessor(Node):
         # runs with require_button:=true (ekf/estimation_restart.py).
         self.wait_for_button = self.declare_parameter(
             'wait_for_button', False).get_parameter_value().bool_value
+        # Simulated pylons for tests without camera, e.g. 'start:entry:green'
+        # = start/finish straight, the seat met first after the last corner,
+        # green. Several separated by '+'. Rows: entry | middle | exit (in the
+        # driving direction), colour: red | green. On the start straight the
+        # rules allow only the inner column, so that is the one. They are
+        # published like detected pylons and never released.
+        self.sim_obstacles_spec = self.declare_parameter(
+            'sim_obstacles', '').get_parameter_value().string_value.strip()
+        self.sim_seats = []
         self.started = not self.wait_for_button
         self.armed_sent = False
         self.test_pose_field = None  # field pose at the start on the straight
@@ -1442,7 +1454,12 @@ class ScanProcessor(Node):
         If there are walls at inner-wall distance on BOTH sides, the robot
         is not in the bay -- then no vote.
         """
-        left, right = self._side_distances(measured)
+        # Sides only from real wall pieces: a pylon beside the bay is a 5 cm
+        # "wall" and was taken as the inner wall at 0.44 m -- no vote at all,
+        # not even the direction (only_parken_32).
+        walls = [w for w in measured
+                 if float(np.hypot(*(np.asarray(w[3]) - np.asarray(w[2])))) >= BAY_SIDE_MIN_LEN]
+        left, right = self._side_distances(walls)
 
         def inner_side(d):
             return d is not None and BAY_INNER_MIN <= d <= BAY_INNER_MAX
@@ -1466,8 +1483,104 @@ class ScanProcessor(Node):
             if front is not None:
                 self._front_src = 'inner_end'
         if front is None:
+            front = self._front_via_pylon_seat(walls, side, d_inner)
+            if front is not None:
+                self._front_src = 'inner_end'      # same: median over more votes
+        if front is None:
             return None
         return (race_dir, front, d_inner)
+
+    def _front_via_pylon_seat(self, walls, side, d_inner):
+        """Last fallback: a pylon on the start straight as the reference.
+
+        only_parken_32: a pylon on the seat beside the bay hid the end of the
+        inner wall, the front wall is behind the magenta wall anyway -- no
+        front distance, no map, start failed after 40 s. But pylons only stand
+        on seats: rows 1.0 / 1.5 / 2.0 m before the front wall (SEAT_ROWS), on
+        the start straight only in the inner column (rules). So the front wall
+        lies at (pylon along the straight) + 1.0, 1.5 or 2.0. The row is
+        decided by what else can be seen:
+          - the visible inner wall reaches at least to its front end seen
+            -> front >= that + 1.0
+          - the far outer wall is visible from x_far on: the corner of the
+            inner box must not hide it -> corner <= x_far * d_inner / d_far
+          - without the far wall: the inner wall reaches at most 1 m in front
+            of its rear end seen
+        Only if exactly one row fits. Positions along the inner wall (yaw
+        removed, see _inner_end_along)."""
+        pts = getattr(self, 'bay_scan_pts', None)
+        if pts is None or len(pts) == 0:
+            return None
+        inner = [w for w in walls
+                 if abs(wrap(w[0] + side * np.pi / 2.0)) < SIDE_ALPHA_TOL
+                 and abs(abs(w[1]) - d_inner) < 0.02]
+        if not inner:
+            return None
+        w_in = max(inner, key=lambda w: np.hypot(*(np.asarray(w[3]) - np.asarray(w[2]))))
+        yaw = wrap(w_in[0] + side * np.pi / 2.0)
+        c, sn = np.cos(yaw), np.sin(yaw)
+
+        def along(x, y):
+            return x * c + y * sn
+
+        def lateral(x, y):                         # towards the inner wall, positive
+            return side * (-x * sn + y * c)
+
+        e1, e2 = np.asarray(w_in[2]), np.asarray(w_in[3])
+        in_front = max(along(*e1), along(*e2))
+        in_rear = min(along(*e1), along(*e2))
+        lo = in_front + (OUTER_HALF - INNER_HALF)
+        hi = in_rear + 2.0 * (OUTER_HALF - INNER_HALF)
+        far = [w for w in walls
+               if abs(wrap(w[0] + side * np.pi / 2.0)) < SIDE_ALPHA_TOL
+               and 2.4 <= abs(w[1]) <= 3.1]
+        if far:
+            w_far = min(far, key=lambda w: abs(w[1]))
+            f1, f2 = np.asarray(w_far[2]), np.asarray(w_far[3])
+            x_far = min(along(*f1), along(*f2)) - LIDAR_OFFSET_X     # LiDAR frame
+            corner = x_far * d_inner / abs(w_far[1]) + LIDAR_OFFSET_X
+            hi = min(hi, corner + (OUTER_HALF - INNER_HALF))
+
+        # pylon clusters between robot and inner wall (base_link frame)
+        bx = pts[:, 0] + LIDAR_OFFSET_X
+        by = pts[:, 1]
+        a, q = along(bx, by), lateral(bx, by)
+        sel = (q > 0.25) & (q < d_inner - 0.15) & (a > -0.4) & (a < 1.2)
+        if sel.sum() < 3:
+            return None
+        P = np.column_stack([bx[sel], by[sel]])
+        order = np.argsort(np.arctan2(P[:, 1], P[:, 0] - LIDAR_OFFSET_X))
+        P = P[order]
+        clusters, cur = [], [P[0]]
+        for p_prev, p in zip(P[:-1], P[1:]):
+            if np.hypot(*(p - p_prev)) > 0.03:
+                clusters.append(np.array(cur)); cur = []
+            cur.append(p)
+        clusters.append(np.array(cur))
+        fronts = []
+        for cl in clusters:
+            if len(cl) < 3 or np.hypot(*(cl.max(axis=0) - cl.min(axis=0))) > PYLON_MAX_EXTENT:
+                continue
+            m = cl.mean(axis=0)
+            ray = m - np.array([LIDAR_OFFSET_X, 0.0])
+            m = m + PYLON_HALF * ray / (np.hypot(*ray) or 1.0)     # seen face -> centre
+            if abs((d_inner - lateral(*m)) - SEAT_INNER_INSET) > 0.08:
+                continue                     # not on an inner-column seat
+            for row in (1.0, 1.5, 2.0):
+                f = along(*m) + row
+                if lo - 0.03 <= f <= hi + 0.03 and f >= FRONT_MIN_DIST:
+                    fronts.append(f)
+        if not fronts or max(fronts) - min(fronts) > 0.03:
+            if fronts:
+                self.get_logger().warn(
+                    f'bay: pylon seat ambiguous ({", ".join("%.2f" % f for f in fronts)})',
+                    throttle_duration_sec=5.0)
+            return None
+        f = float(np.mean(fronts))
+        self.get_logger().info(
+            f'bay: front wall and inner wall end hidden -- from the pylon on its seat: '
+            f'{f:.3f} m (row range {lo:.2f}..{hi:.2f})', throttle_duration_sec=5.0)
+        return f
 
     def _front_via_inner_end(self, measured, side):
         """Last fallback: the front END of the inner wall, even if less than
@@ -1734,6 +1847,7 @@ class ScanProcessor(Node):
             np.hypot(*(np.mean([q['p'] for q in g], axis=0) - (cx, cy)))
             for g in seats]))
         self.obstacle_map = ObstacleMap(seats)
+        self._build_sim_seats(seats)
         self.get_logger().info(
             f'obstacle seat grid ready (24 seats, groups -> walls '
             f'{self.seat_wall_idx}, start straight = group '
@@ -1750,6 +1864,30 @@ class ScanProcessor(Node):
                 f'{len(self.pending_dets)} scans taken before the latch')
             self.pending_dets.clear()
             self._publish_obstacles_if_changed()
+
+    def _build_sim_seats(self, seats):
+        """sim_obstacles -> seat dicts like occupied_seats() returns."""
+        if not self.sim_obstacles_spec:
+            return
+        cx, cy, th = self.commit_pose
+        tx, ty = np.cos(th), np.sin(th)          # driving direction on the start straight
+        for spec in self.sim_obstacles_spec.split('+'):
+            parts = [p.strip().lower() for p in spec.split(':')]
+            if len(parts) != 3 or parts[0] != 'start' \
+                    or parts[1] not in ('entry', 'middle', 'exit') \
+                    or parts[2] not in ('red', 'green'):
+                self.get_logger().error(
+                    f'sim_obstacles: "{spec}" not understood -- start:<entry|middle|exit>:<red|green>')
+                continue
+            group = [q for q in seats[self.start_seat_group] if q['column'] == 'inner']
+            group.sort(key=lambda q: (q['p'][0] - cx) * tx + (q['p'][1] - cy) * ty)
+            seat = dict({'entry': group[0], 'middle': group[1], 'exit': group[-1]}[parts[1]])
+            seat.update(straight=self.start_seat_group, color=parts[2], votes=99)
+            self.sim_seats.append(seat)
+            self.get_logger().warn(
+                f'SIMULATED pylon #{self._seat_id(seat)} ({parts[2]}) on the start straight, '
+                f'{parts[1]} seat at ({seat["p"][0]:+.2f}, {seat["p"][1]:+.2f}) -- test only!')
+        self._publish_obstacles_if_changed()
 
     def _seat_allowed(self, seat_group, column):
         """Parking bay rule: if a parking bay is present, the rules move all
@@ -1772,6 +1910,8 @@ class ScanProcessor(Node):
 
     def _publish_obstacles_if_changed(self):
         occupied = self.obstacle_map.occupied_seats()
+        ids = {self._seat_id(s) for s in occupied}
+        occupied += [s for s in self.sim_seats if self._seat_id(s) not in ids]
         state = tuple(sorted((self._seat_id(s), s['color']) for s in occupied))
         if state == self.obstacle_state:
             return
