@@ -3858,6 +3858,10 @@ class Round1Controller(Node):
         if not self.obs_path:
             self._return_path()
         self.state = 'DRIVE'
+        # Backed up from INSIDE a corner: the replanned corner's turn-in point
+        # can lie well behind (only_parken_42: 0.56 m, heading already -37 deg)
+        # -- that is no wrong corner, the arc is anchored at the pose instead.
+        self.after_manoeuvre = True
         self.get_logger().info(
             "Manoeuvred: pose (%.2f, %.2f), heading %+.1f deg -- replanned, carrying on."
             % (x, y, math.degrees(theta)))
@@ -4902,9 +4906,10 @@ class Round1Controller(Node):
             # that carried the first corner in run 21 straight into the wall --
             # and in the CCW park test to within 4 cm of the front wall.
             # Settling happens BEFORE T_A by slowing down (see below).
-            if -to_TA > self.turn_in_past_max:
+            if -to_TA > self.turn_in_past_max and not getattr(self, 'after_manoeuvre', False):
                 # only plausibility now -- this far past T_A something
-                # fundamental is wrong (wrong corner?)
+                # fundamental is wrong (wrong corner?). Not after a manoeuvre:
+                # then it simply backed up out of the corner.
                 self.state = 'DONE'
                 self.publish_stop()
                 self.get_logger().error(
@@ -4972,6 +4977,7 @@ class Round1Controller(Node):
                     f"Turn-in unsteady: lat={lateral:.3f} om={om_last:.2f} "
                     f"-- turned in at T_A anyway (the geometry must not run away).")
             self.state = 'TURN'
+            self.after_manoeuvre = False
             if lateral > self.turn_in_lat_warn:
                 self.get_logger().warn(
                     f"Turn-in with lateral error {lateral:.2f} m (> {self.turn_in_lat_warn:.2f}) "
