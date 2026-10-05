@@ -16,6 +16,9 @@ a watchdog on the Jetson (window 11, src/estimation_watchdog.sh):
      stay in their windows -- and replies with the same id.
   3. Here we wait until gyro ok, bay detected and localisation ok.
      If that does not work out, the driving node does not start at all.
+     With after_button (competition, require_button:=true) only until gyro ok
+     and the scan_processor reports LiDAR scans: the rules forbid measuring
+     before the start button, so the map only comes after the press.
 
 Call BEFORE creating your own node: its latched subscriptions
 (/corner_geometry, ...) would otherwise still get the values of the old scan_processor.
@@ -30,7 +33,7 @@ import uuid
 import rclpy
 import rclpy.logging
 from rclpy.qos import DurabilityPolicy, QoSProfile
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Float64, String
 
 from robot_msgs.msg import CornerGeometry
 
@@ -50,6 +53,14 @@ def _disabled(argv):
     return False
 
 
+def _open_race(argv):
+    """Open challenge (-p race_mode:=open, set by start_robot.sh --open)."""
+    return any(a.replace(' ', '').lower() == 'race_mode:=open' for a in argv)
+
+
+LOC_GRACE_OPEN = 5.0     # open: after gyro + start pose, wait this long for 'ok'
+
+
 def _remove(file_path):
     try:
         os.remove(file_path)
@@ -57,7 +68,7 @@ def _remove(file_path):
         pass
 
 
-def restart_estimation(node_name, argv=None, scan_args=''):
+def restart_estimation(node_name, argv=None, scan_args='', after_button=False):
     """Trigger the restart and wait until both are ready.
 
     Ends the process (SystemExit 1) if the watchdog does not reply or
@@ -66,6 +77,9 @@ def restart_estimation(node_name, argv=None, scan_args=''):
     scan_args: additional ROS arguments for the scan_processor (e.g.
     '-p start_from_bay:=false -p start_straight:=CCW' for the park test).
     The watchdog only lets harmless characters through.
+
+    after_button: the scan_processor is started with wait_for_button, so there
+    is no map before the press -- wait only for gyro and LiDAR.
     """
     argv = sys.argv if argv is None else argv
     log = rclpy.logging.get_logger(node_name)
@@ -110,20 +124,64 @@ def restart_estimation(node_name, argv=None, scan_args=''):
     n = rclpy.create_node(node_name + '_restart_wait')
     q = QoSProfile(depth=1)
     q.durability = DurabilityPolicy.TRANSIENT_LOCAL
-    st = {'gyro': None, 'map': False, 'loc': None}
+    st = {'gyro': None, 'map': False, 'loc': None, 'start': False, 'armed': False}
     n.create_subscription(Bool, '/ekf/gyro_ok', lambda m: st.update(gyro=m.data), q)
     n.create_subscription(CornerGeometry, '/corner_geometry',
                           lambda m: st.update(map=True), q)
     n.create_subscription(String, '/localization_state',
                           lambda m: st.update(loc=m.data), q)
+    # Open challenge: the scan_processor only publishes the corner geometry
+    # once the direction is latched, near the first corner. Before that the
+    # start pose (/front_wall_x) is all there is.
+    open_race = _open_race(argv)
+    n.create_subscription(Float64, '/front_wall_x',
+                          lambda m: st.update(start=True), q)
+    n.create_subscription(Bool, '/scan_processor/armed',
+                          lambda m: st.update(armed=m.data), q)
     try:
         t0 = time.monotonic()
+        t_open = None
         while time.monotonic() - t0 < READY_TIMEOUT:
             rclpy.spin_once(n, timeout_sec=0.2)
+            if after_button:
+                if st['gyro'] and st['armed']:
+                    log.info('Ready after %.0f s: gyro ok, LiDAR there. Map and start '
+                             'pose only after the start button (%s).'
+                             % (time.monotonic() - t0,
+                                'open challenge' if open_race else 'obstacle'))
+                    return
+                continue
+            if open_race and st['gyro'] and st['start']:
+                if st['loc'] == 'ok':
+                    log.info('Ready after %.0f s (open challenge): gyro ok, start '
+                             'pose measured, localisation ok.' % (time.monotonic() - t0))
+                    return
+                t_open = t_open or time.monotonic()
+                if time.monotonic() - t_open > LOC_GRACE_OPEN:
+                    log.warn('Ready after %.0f s (open challenge): gyro ok, start '
+                             'pose measured, localisation still %s -- starting anyway.'
+                             % (time.monotonic() - t0, st['loc'] or '-'))
+                    return
+                continue
             if st['gyro'] and st['map'] and st['loc'] == 'ok':
                 log.info('Ready after %.0f s: gyro ok, bay detected, localisation ok.'
                          % (time.monotonic() - t0))
                 return
+        if after_button:
+            log.fatal('NOT ready after %.0f s: gyro %s, scan_processor %s. Not started.'
+                      % (READY_TIMEOUT,
+                         {None: 'no message', True: 'ok', False: 'FAILED'}[st['gyro']],
+                         'waits for the button' if st['armed']
+                         else 'no LiDAR scans (window 0 / window 9?)'))
+            raise SystemExit(1)
+        if open_race:
+            log.fatal('NOT ready after %.0f s (open challenge): gyro %s, start pose %s, '
+                      'localisation %s. Not started.'
+                      % (READY_TIMEOUT,
+                         {None: 'no message', True: 'ok', False: 'FAILED'}[st['gyro']],
+                         'measured' if st['start'] else 'missing (/front_wall_x)',
+                         st['loc'] or '-'))
+            raise SystemExit(1)
         log.fatal('NOT ready after %.0f s: gyro %s, map %s, localisation %s. '
                   'Not started.'
                   % (READY_TIMEOUT,

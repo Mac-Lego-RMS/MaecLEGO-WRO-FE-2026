@@ -120,6 +120,14 @@ class EKFNode(Node):
         # 0 = as before, publish on every measurement.
         self.declare_parameter('publish_rate_hz', 50.0,
                                ParameterDescriptor(dynamic_typing=True))
+        # Wall corrections are applied to the CURRENT state. One that is older
+        # than this (scan stamp -> now) is dropped: in open_test_2 they came
+        # 0.5 s late and pulled the pose 10 cm off in the corner. Normal is
+        # ~0.07 s (one scan period). 0 = accept everything.
+        self.declare_parameter('wall_max_age', 0.25,
+                               ParameterDescriptor(dynamic_typing=True))
+        self.wall_max_age = float(self.get_parameter('wall_max_age').value)
+        self.n_wall_stale = 0
         self.publish_rate = float(self.get_parameter('publish_rate_hz').value)
         # Only publish if something was really computed since the last time.
         # Otherwise the odometry would just keep going with failed sensors and
@@ -252,6 +260,15 @@ class EKFNode(Node):
 
     # --- wall correction: applied to current state (approach B) -----------
     def wall_cb(self, msg):
+        if self.wall_max_age > 0.0 and msg.matches:
+            age = self.get_clock().now().nanoseconds * 1e-9 - stamp_to_sec(msg.header.stamp)
+            if age > self.wall_max_age:
+                self.n_wall_stale += 1
+                self.get_logger().warn(
+                    f'wall correction dropped: {age * 1e3:.0f} ms old (limit '
+                    f'{self.wall_max_age * 1e3:.0f} ms, total {self.n_wall_stale}) -- '
+                    f'is the scan_processor keeping up?', throttle_duration_sec=1.0)
+                return
         for wm in msg.matches:
             self.ekf.update_wall(wm.alpha_meas, wm.d_meas, wm.alpha_map, wm.d_map)
         if msg.matches:

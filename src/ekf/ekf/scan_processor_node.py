@@ -49,8 +49,9 @@ from nav_msgs.msg import Odometry
 from robot_msgs.msg import (WallMatch, WallMatchArray, CornerGeometry, WallHNF,
                             Obstacle, ObstacleArray)
 
-from std_msgs.msg import Float64, String, Int32MultiArray, Float64MultiArray
-from rclpy.qos import QoSProfile, DurabilityPolicy
+from std_msgs.msg import (Bool, Float64, Header, String, Int32MultiArray,
+                           Float64MultiArray)
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 
 from geometry_msgs.msg import Point
 
@@ -164,6 +165,8 @@ EXIT_MAX_DIST = 1.20           # emergency exit: driven this far -> surely out
 FRONT_ALPHA_TOL = np.radians(25.0)
 FRONT_MIN_LEN = 0.50           # front wall is 3 m long, the bay wall 0.20 m
 FRONT_MIN_DIST = 0.60          # the bay is never right at the corner
+INNER_END_FREE = 0.30          # beams past the inner wall end must reach this much further
+BAY_VOTES_INNER_END = 11       # votes (median) when the front comes from the inner wall end
 
 # Mask the parking bay out of the wall extraction. The bay walls are not in the
 # wall model, and in the last corner the path goes right past them: in one run
@@ -229,6 +232,18 @@ def yaw_from_quaternion(q):
     return np.arctan2(siny, cosy)
 
 
+def _inner_end_along(w, p, side):
+    """Position of a point of the inner wall ALONG that wall (= along the
+    start straight), from base_link. The inner wall lies 0.86 m to the side:
+    measured along the robot axis instead, 1 deg of yaw when placing the robot
+    shifts its end by 1.5 cm. only_parken_13-20, robot placed identically to
+    the millimetre: front wall 1.148-1.189 m along the axis, 1.150-1.160 m
+    along the wall -- and the map, and with it the park start pose, moved
+    with the 4 cm."""
+    yaw = wrap(w[0] + side * np.pi / 2.0)     # wall direction relative to the robot axis
+    return float(p[0]) * np.cos(yaw) + float(p[1]) * np.sin(yaw)
+
+
 class ScanProcessor(Node):
     def __init__(self):
         super().__init__('scan_processor')
@@ -274,9 +289,21 @@ class ScanProcessor(Node):
         if self.start_straight:
             self.start_from_bay = False
             self.parking_lot_present = True
+        # Competition rule: the robot must not measure anything before the
+        # start button. With wait_for_button the node ignores /scan and the
+        # colour scan until the first press on /esp_serial_bridge/button --
+        # start detection, map, direction and seat grid all come into being
+        # only after it. round1_controller sets this on its restart when it
+        # runs with require_button:=true (ekf/estimation_restart.py).
+        self.wait_for_button = self.declare_parameter(
+            'wait_for_button', False).get_parameter_value().bool_value
+        self.started = not self.wait_for_button
+        self.armed_sent = False
         self.test_pose_field = None  # field pose at the start on the straight
         self.straight_votes = []
         self.bay_votes = []          # (race_dir, front_d, d_inner) per scan
+        self.bay_votes_inner_end = 0 # of them from the inner wall end
+        self._front_src = None
         self.bay_pose_field = None   # field pose of the robot, measured in the bay
         self.bay_left = False        # LiDAR has left the bay (sticky)
         # None (before the commit) | 'parked' | 'exiting' | 'clear'
@@ -352,7 +379,13 @@ class ScanProcessor(Node):
         # late. A dropped scan costs nothing, an outdated one pulls the
         # heading back.
         latest = QoSProfile(depth=1)
-        self.create_subscription(LaserScan, '/scan', self.scan_cb, latest)
+        # /scan BEST_EFFORT, like every other reader of it (fusion, overlay).
+        # As the only RELIABLE reader the freshly restarted node got each scan
+        # ~0.42 s late for up to 40 s (open_test_2, video_bag_2) -- the
+        # reliability protocol, not the compute (3 ms). Its wall corrections
+        # then reached the EKF 0.5 s old and pulled the pose away in the corner.
+        scan_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.create_subscription(LaserScan, '/scan', self.scan_cb, scan_qos)
         self.create_subscription(Odometry, '/ekf/odom', self.pose_cb, 10)
         self.create_subscription(Int32MultiArray,
                                  '/round1_controller/lap_state',
@@ -385,10 +418,20 @@ class ScanProcessor(Node):
         # Start straight scanned from the bay? 'scanning' -> 'complete' |
         # 'incomplete'. Only then is /obstacles complete for the start straight.
         self.start_scan_pub = self.create_publisher(String, '/start_scan_state', latched)
+        # wait_for_button: true once scans arrive and the node waits for the
+        # button -- estimation_restart waits for this instead of the map.
+        self.armed_pub = self.create_publisher(Bool, '/scan_processor/armed', latched)
+        if self.wait_for_button:
+            self.create_subscription(Header, '/esp_serial_bridge/button',
+                                     self.button_cb, 10)
 
         self.get_logger().info(
             f'start detection running (mode={self.race_mode}, '
             f'parking_lot={self.parking_lot_present})...')
+        if self.wait_for_button:
+            self.get_logger().info(
+                'wait_for_button: NO measuring before the start button -- start '
+                'detection and map only after the press.')
         if self.wait_for_parking:
             self.get_logger().info(
                 'wait_for_parking: the driving direction comes from the parking bay '
@@ -463,10 +506,26 @@ class ScanProcessor(Node):
     # ------------------------------------------------------------------ #
 
     def scan_cb(self, msg):
+        if not self.started:
+            if not self.armed_sent:
+                self.armed_sent = True
+                self.armed_pub.publish(Bool(data=True))
+                self.get_logger().info('LiDAR there, waiting for the start button.')
+            return
         self._timed('scan', msg, self._scan_cb)
 
     def colored_scan_cb(self, msg):
+        if not self.started:
+            return
         self._timed('color', msg, self._colored_scan_cb)
+
+    def button_cb(self, msg):
+        """Start button (the bridge publishes a Header per press): from now on
+        scans count -- start detection, map, direction."""
+        if self.started:
+            return
+        self.started = True
+        self.get_logger().info('Start button -- start detection running.')
 
     def _timed(self, kind, msg, fn):
         """Run the callback and collect latency (scan stamp -> start of
@@ -513,6 +572,7 @@ class ScanProcessor(Node):
                 self._straight_start_step(measured)
                 return
             if self.start_from_bay and self.race_mode == 'obstacle':
+                self.bay_scan_pts = scan_to_points(msg)   # for _front_via_inner_end
                 self._bay_start_step(measured)
                 return
             if self.wait_for_parking and self.parking_direction is None:
@@ -1402,8 +1462,58 @@ class ScanProcessor(Node):
         if front is None:
             front = self._front_piece(measured)
         if front is None:
+            front = self._front_via_inner_end(measured, side)
+            if front is not None:
+                self._front_src = 'inner_end'
+        if front is None:
             return None
         return (race_dir, front, d_inner)
+
+    def _front_via_inner_end(self, measured, side):
+        """Last fallback: the front END of the inner wall, even if less than
+        0.9 m of it is visible, as long as that end is provably a real end.
+
+        only_parken_5: the robot stood at the FRONT of the bay. The front
+        magenta wall 3 cm ahead of the nose hides the whole front wall, and of
+        the inner wall only 0.56 m were visible -- the rear part lies in the
+        LiDAR's blind zone behind it. _front_via_inner_wall demands 0.9 m
+        so that a pylon shadow cannot fake an end. Here instead: the beams
+        just FORWARD of the end must run on freely into the field (at least
+        INNER_END_FREE further than the end). If something stands in front of
+        the wall and cuts it off, those beams stop at it -> no vote."""
+        pts = getattr(self, 'bay_scan_pts', None)
+        if pts is None or len(pts) == 0:
+            return None
+        ang = np.arctan2(pts[:, 1], pts[:, 0])
+        rng = np.hypot(pts[:, 0], pts[:, 1])
+        best = None
+        for w in measured:
+            if abs(wrap(w[0] + side * np.pi / 2.0)) >= SIDE_ALPHA_TOL:
+                continue
+            if not (BAY_INNER_MIN <= abs(w[1]) <= BAY_INNER_MAX):
+                continue
+            p1, p2 = np.asarray(w[2]), np.asarray(w[3])
+            if float(np.hypot(*(p2 - p1))) < 0.30:
+                continue
+            end = p1 if p1[0] >= p2[0] else p2          # base_link
+            f = _inner_end_along(w, end, side) + (OUTER_HALF - INNER_HALF)
+            if f < FRONT_MIN_DIST:
+                continue
+            ex, ey = float(end[0]) - LIDAR_OFFSET_X, float(end[1])   # LiDAR frame
+            b_end, r_end = np.arctan2(ey, ex), np.hypot(ex, ey)
+            # beams 2..12 deg further FORWARD than the end (towards angle 0)
+            lo, hi = sorted((b_end - side * np.radians(2.0),
+                             b_end - side * np.radians(12.0)))
+            sel = (ang >= lo) & (ang <= hi)
+            if sel.sum() < 3 or float(rng[sel].min()) < r_end + INNER_END_FREE:
+                continue                                 # end cut off by something
+            if best is None or f < best:
+                best = f
+        if best is not None:
+            self.get_logger().info(
+                f'bay: front wall not visible -- from the free front end of the '
+                f'inner wall: {best:.3f} m', throttle_duration_sec=5.0)
+        return best
 
     @staticmethod
     def _front_piece(measured):
@@ -1453,7 +1563,8 @@ class ScanProcessor(Node):
             p1, p2 = np.asarray(w[2]), np.asarray(w[3])
             if float(np.hypot(*(p2 - p1))) < 0.9:
                 continue
-            front_end = max(float(p1[0]), float(p2[0]))
+            # along the WALL, not along the robot axis (see _inner_end_along)
+            front_end = max(_inner_end_along(w, p1, side), _inner_end_along(w, p2, side))
             if front_end <= 0.0:
                 continue
             f = front_end + (OUTER_HALF - INNER_HALF)
@@ -1464,20 +1575,29 @@ class ScanProcessor(Node):
     def _bay_start_step(self, measured):
         """Vote at standstill in the bay, then build map, direction and seat
         grid in one go."""
+        self._front_src = None
         v = self._bay_vote(measured)
         if v is not None:
             self.bay_votes.append(v)
-        if len(self.bay_votes) < START_VOTES:
+            if self._front_src == 'inner_end':
+                self.bay_votes_inner_end += 1
+        # The inner wall end scatters more than the front wall itself and has
+        # one-sided outliers (end found 3-6 cm short when a few beams at the
+        # end drop out: only_parken_14 1096/1114 mm among ~1152). With the
+        # MEAN of 5 votes the result moved by up to 2.8 cm depending on the
+        # window. Hence median, and more votes when that end is used.
+        need = BAY_VOTES_INNER_END if self.bay_votes_inner_end else START_VOTES
+        if len(self.bay_votes) < need:
             return
 
         race_dir, n = Counter(b[0] for b in self.bay_votes).most_common(1)[0]
-        if n < START_VOTES:
+        if n < need:
             # no agreement -- do not decide yet, keep collecting
-            self.bay_votes = self.bay_votes[-START_VOTES:]
+            self.bay_votes = self.bay_votes[-need:]
             return
         win = [b for b in self.bay_votes if b[0] == race_dir]
-        front_d = float(np.mean([b[1] for b in win]))
-        d_inner = float(np.mean([b[2] for b in win]))
+        front_d = float(np.median([b[1] for b in win]))
+        d_inner = float(np.median([b[2] for b in win]))
 
         # north lane, inner wall at y = 0.5:
         #   CW  faces +x, front wall at x = +1.5
