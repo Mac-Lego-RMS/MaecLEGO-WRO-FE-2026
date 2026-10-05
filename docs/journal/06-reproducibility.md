@@ -120,6 +120,59 @@ results over all recorded runs are in [chapter 3](04-software.md).
 On every push to `main`, GitHub Actions checks the README length and
 untranslated text and builds this journal as a PDF.
 
+### Evaluation in Foxglove
+
+Every run is looked at twice: live on the field, and afterwards from its
+recording. Both use [Foxglove](https://foxglove.dev) with the same view.
+
+**Live.** `foxglove_bridge` runs on the vehicle (window 4 of the start script) and
+a laptop connects to it over the network. The node `foxglove_overlay`
+([`ekf/foxglove_overlay_node.py`](../../src/ekf/ekf/foxglove_overlay_node.py))
+draws what the software believes: the field as the scan processor measured it,
+the walls matched to the map, the driven path, the pose with its uncertainty, the
+detected pillars and the run clock. It also forwards the Jetson's load and
+temperatures. Nothing on the vehicle depends on it; it exists only to be looked
+at.
+
+**From the recording.** The `/viz` topics of the overlay are recorded with every
+run, so the same view can be replayed and stepped through. A `.db3` recording
+does not contain its message definitions, and Foxglove's built-in definition of
+`visualization_msgs/Marker` does not match ROS 2 Humble, so the overlay markers
+fail to decode. [`bag_to_mcap.py`](../analysis/bag_to_mcap.py) converts a
+recording to MCAP with the Humble definitions and our own `robot_msgs` embedded,
+without changing a byte of the messages and without a ROS installation:
+
+```bash
+pip install rosbags
+python3 docs/analysis/bag_to_mcap.py ~/runs/cw_pos1_22   # -> ~/runs/cw_pos1_22_mcap/
+```
+
+![Replay of run `cw_pos1_22` (obstacle challenge, clockwise) in Foxglove: the outer and inner walls as measured, with their normals; the path of all three laps in yellow; the detected pillars in red and green; the vehicle at the end of the run.](../figures/foxglove_3d_obstacle.png)
+
+<!-- TODO figures: open challenge replay; camera and coloured LiDAR points
+(parken_test_4); Jetson load of the last obstacle run (parken_test_49).
+TODO: export the Foxglove layouts to setup/foxglove/ and link them here. -->
+
+The replay answers the questions a number cannot: where the vehicle lost a wall,
+which pillar was seen from where, what the controller saw when it braked. The
+numbers themselves then come from the scripts in
+[`docs/analysis/`](../analysis), over all runs at once
+([chapter 3](04-software.md)).
+
+**A fault that was in every recording.** Plotted over a run, the reported pack
+voltage is a flat line at 17.52 V, 4.38 V per cell. That is impossible twice: a
+full LiPo cell has 4.2 V, and under load the voltage has to fall. The table of
+all runs ([`data/runs.csv`](../data/runs.csv)) shows the same value as the
+minimum voltage of all 73 recorded runs between 11 and 29 September. The reading
+had been stuck for weeks, and because 17.5 V looks like a full battery, nobody
+noticed while driving; the low-voltage warning could never have fired. The cause
+was a failed resistor in the voltage divider
+([chapter 2](03-power-sensors.md#fault-found-and-fixed-the-divider-read-18--high)).
+A plausible value is not proof of a working sensor; a signal that never moves is
+the warning sign.
+
+![Foxglove plot of the reported pack voltage over run `parken_test_49` (detail): a flat line at 17.52 V for the whole run; the legend shows 4.38 V per cell.](../figures/foxglove_battery_flat.png)
+
 ## Versions
 
 | Version | Commit | State |

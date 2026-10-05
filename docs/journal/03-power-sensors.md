@@ -146,7 +146,9 @@ accurate to ±1.1 % (see [Calibration](#battery-voltage)).
 
 The fault is documented here rather than silently repaired because of how it was
 found: not by the warning misbehaving, but by cross-checking one measurement
-against an independent reference during an unrelated test.
+against an independent reference during an unrelated test. In hindsight it is visible in every recording: all 73 recorded runs from
+11 to 29 September report exactly 17.52 V as their minimum pack voltage
+([chapter 5](06-reproducibility.md#evaluation-in-foxglove)).
 
 ### Dual-input power path
 
