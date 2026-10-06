@@ -1557,9 +1557,14 @@ class ScanProcessor(Node):
         in_rear = min(along(*e1), along(*e2))
         lo = in_front + (OUTER_HALF - INNER_HALF)
         hi = in_rear + 2.0 * (OUTER_HALF - INNER_HALF)
+        # Only a far wall seen AHEAD of the LiDAR says where the corner of the
+        # inner box hides it. In CW the far outer wall is also visible BEHIND
+        # the robot (only_parken_83: x -1.07..-0.45) -- taken as the start of
+        # the view, it pushed the upper bound to 0.75 m and killed every row.
         far = [w for w in walls
                if abs(wrap(w[0] + side * np.pi / 2.0)) < SIDE_ALPHA_TOL
-               and 2.4 <= abs(w[1]) <= 3.1]
+               and 2.4 <= abs(w[1]) <= 3.1
+               and min(along(*np.asarray(w[2])), along(*np.asarray(w[3]))) > LIDAR_OFFSET_X]
         if far:
             w_far = min(far, key=lambda w: abs(w[1]))
             f1, f2 = np.asarray(w_far[2]), np.asarray(w_far[3])
