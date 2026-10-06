@@ -8,6 +8,9 @@
 #   rlog            start-up log of robot.service in this boot
 #   rmode [open|obstacle] [auto|noauto]
 #                   show / set config/race.env (takes effect with rs or a reboot)
+#   simgui [args]   obstacle layout in the browser, http://<jetson>:8765
+#                   (start the controller with -p sim_obstacles:=file);
+#                   simgui --random [--late 30] writes a random layout at once
 
 ROBOT_WS=${ROBOT_WS:-$HOME/ros2_ws}
 ROBOT_SESSION=robot_session
@@ -47,3 +50,6 @@ rmode() {
     done
     grep -E "^(RACE|AUTOSTART|CAMERA)=" "$f"
 }
+
+
+simgui() { python3 "$ROBOT_WS/src/sim_obstacles_gui.py" "$@"; }

@@ -5560,7 +5560,8 @@ def _scan_args(argv):
         race_mode, 'true' if unpark and race_mode == 'obstacle' else 'false')
     if _require_button(argv):
         args += ' -p wait_for_button:=true'
-    # test without camera: simulated pylons, e.g. sim_obstacles:=start:entry:green
+    # test without camera: simulated pylons, e.g. sim_obstacles:=s1:exit:outer:red:r80
+    # or sim_obstacles:=file (layout from src/sim_obstacles_gui.py)
     sim = ''.join(ch for ch in vals.get('sim_obstacles', '') if ch.isalnum() or ch in ':+')
     if sim:
         args += ' -p sim_obstacles:=' + sim

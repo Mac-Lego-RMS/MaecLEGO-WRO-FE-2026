@@ -38,6 +38,7 @@ Publishes:  /wall_matches
             /obstacles         (latched) accumulated obstacle set, map frame
 """
 import numpy as np
+import re
 import time
 from collections import Counter, deque
 
@@ -167,6 +168,7 @@ FRONT_MIN_LEN = 0.50           # front wall is 3 m long, the bay wall 0.20 m
 FRONT_MIN_DIST = 0.60          # the bay is never right at the corner
 INNER_END_FREE = 0.30          # beams past the inner wall end must reach this much further
 BAY_VOTES_INNER_END = 11       # votes (median) when the front comes from the inner wall end
+SIM_OBSTACLES_FILE = '/workspace/config/sim_obstacles.txt'   # sim_obstacles:=file
 POSE_RESET_WAIT = 1.0          # s to wait for the zeroed EKF pose after the button
 BAY_SIDE_MIN_LEN = 0.15        # shorter pieces are no wall for the side test (pylon 5 cm)
 PYLON_MAX_EXTENT = 0.08        # a pylon cluster is at most this large
@@ -306,15 +308,24 @@ class ScanProcessor(Node):
         # runs with require_button:=true (ekf/estimation_restart.py).
         self.wait_for_button = self.declare_parameter(
             'wait_for_button', False).get_parameter_value().bool_value
-        # Simulated pylons for tests without camera, e.g. 'start:entry:green'
-        # = start/finish straight, the seat met first after the last corner,
-        # green. Several separated by '+'. Rows: entry | middle | exit (in the
-        # driving direction), colour: red | green. On the start straight the
-        # rules allow only the inner column, so that is the one. They are
-        # published like detected pylons and never released.
+        # Simulated pylons for tests without camera. Entries separated by '+':
+        #   s<k>:<row>:<column>:<colour>[:r<cm>]
+        #     k       straight in driving order, 0 = start/finish straight
+        #     row     entry | middle | exit (in the driving direction)
+        #     column  inner | outer
+        #     colour  red | green
+        #     r<cm>   appears only when the robot is this close (rear axle,
+        #             straight-line distance), e.g. r80 -- like a pylon the
+        #             camera sees late. Without it: known from the start.
+        #   start:<row>:<colour>   old short form = s0:<row>:inner:<colour>
+        #   'file'  read the entries from SIM_OBSTACLES_FILE (written by
+        #           src/sim_obstacles_gui.py), one per line or '+'-separated.
+        # On the start straight with a parking bay only the inner column is
+        # allowed (rules). Published like detected pylons, never released.
         self.sim_obstacles_spec = self.declare_parameter(
             'sim_obstacles', '').get_parameter_value().string_value.strip()
         self.sim_seats = []
+        self.sim_hidden = []          # simulated pylons that appear later (r<cm>)
         self.started = not self.wait_for_button
         self.armed_sent = False
         self.test_pose_field = None  # field pose at the start on the straight
@@ -495,6 +506,25 @@ class ScanProcessor(Node):
                 self.bay_odo_travel += float(msg.twist.twist.linear.x) * dt
                 self.bay_odo_turn += self.yaw_rate * dt
             self.bay_odo_t = t
+        if self.sim_hidden:
+            self._sim_reveal_check()
+
+    def _sim_reveal_check(self):
+        """Simulated pylons with r<cm>: appear once the robot is that close."""
+        x, y, _ = self.pose
+        shown = []
+        for seat in self.sim_hidden:
+            d = float(np.hypot(seat['p'][0] - x, seat['p'][1] - y))
+            if d <= seat['reveal']:
+                shown.append(seat)
+                self.sim_seats.append(seat)
+                self.get_logger().warn(
+                    f'SIMULATED pylon #{self._seat_id(seat)} ({seat["color"]}) appears now '
+                    f'({d:.2f} m away, set to {seat["reveal"]:.2f} m)')
+        if shown:
+            self.sim_hidden = [q for q in self.sim_hidden if all(q is not z for z in shown)]
+            if self.obstacle_map is not None:
+                self._publish_obstacles_if_changed()
 
     def _pose_at(self, stamp):
         """Pose at the time of a measurement instead of the current one.
@@ -1920,27 +1950,69 @@ class ScanProcessor(Node):
             self._publish_obstacles_if_changed()
 
     def _build_sim_seats(self, seats):
-        """sim_obstacles -> seat dicts like occupied_seats() returns."""
-        if not self.sim_obstacles_spec:
+        """sim_obstacles -> seat dicts like occupied_seats() returns (see
+        the parameter for the format)."""
+        spec = self.sim_obstacles_spec
+        if spec.lower() == 'file':
+            try:
+                with open(SIM_OBSTACLES_FILE) as f:
+                    lines = [ln.split('#')[0].strip() for ln in f]
+            except OSError as err:
+                self.get_logger().error(f'sim_obstacles=file: {err}')
+                return
+            spec = '+'.join(ln for ln in lines if ln)
+            self.get_logger().info(f'sim_obstacles from {SIM_OBSTACLES_FILE}: {spec or "(empty)"}')
+        if not spec:
             return
-        cx, cy, th = self.commit_pose
-        tx, ty = np.cos(th), np.sin(th)          # driving direction on the start straight
-        for spec in self.sim_obstacles_spec.split('+'):
-            parts = [p.strip().lower() for p in spec.split(':')]
-            if len(parts) != 3 or parts[0] != 'start' \
-                    or parts[1] not in ('entry', 'middle', 'exit') \
-                    or parts[2] not in ('red', 'green'):
-                self.get_logger().error(
-                    f'sim_obstacles: "{spec}" not understood -- start:<entry|middle|exit>:<red|green>')
+        # Driving order of the seat groups: they are the west straight
+        # rotated k * 90 deg CCW, so CCW driving = k+1, CW = k-1.
+        ccw = self.direction == 'CCW'
+        step = 1 if ccw else -1
+        centres = [np.mean([q['p'] for q in g], axis=0) for g in seats]
+        mid = np.mean(centres, axis=0)
+        taken = set()
+        for entry in re.split(r'[+\s]+', spec):
+            if not entry:
                 continue
-            group = [q for q in seats[self.start_seat_group] if q['column'] == 'inner']
-            group.sort(key=lambda q: (q['p'][0] - cx) * tx + (q['p'][1] - cy) * ty)
-            seat = dict({'entry': group[0], 'middle': group[1], 'exit': group[-1]}[parts[1]])
-            seat.update(straight=self.start_seat_group, color=parts[2], votes=99)
-            self.sim_seats.append(seat)
+            parts = [p.strip().lower() for p in entry.split(':')]
+            reveal = 0.0
+            if parts and re.fullmatch(r'r\d+', parts[-1]):
+                reveal = int(parts[-1][1:]) / 100.0
+                parts = parts[:-1]
+            if len(parts) == 3 and parts[0] == 'start':
+                k, row, col, color = 0, parts[1], 'inner', parts[2]
+            elif len(parts) == 4 and re.fullmatch(r's[0-3]', parts[0]):
+                k, (row, col, color) = int(parts[0][1]), parts[1:]
+            else:
+                k = row = col = color = None
+            if (k is None or row not in ('entry', 'middle', 'exit')
+                    or col not in ('inner', 'outer') or color not in ('red', 'green')):
+                self.get_logger().error(
+                    f'sim_obstacles: "{entry}" not understood -- '
+                    f's<0-3>:<entry|middle|exit>:<inner|outer>:<red|green>[:r<cm>] '
+                    f'or start:<entry|middle|exit>:<red|green>')
+                continue
+            g = (self.start_seat_group + step * k) % 4
+            if not self._seat_allowed(g, col):
+                self.get_logger().error(
+                    f'sim_obstacles: "{entry}" -- outer column of the start straight is '
+                    f'not allowed with a parking bay (rules). Skipped.')
+                continue
+            rx, ry = centres[g] - mid
+            tx, ty = (-ry, rx) if ccw else (ry, -rx)        # driving direction on this straight
+            group = sorted([q for q in seats[g] if q['column'] == col],
+                           key=lambda q: q['p'][0] * tx + q['p'][1] * ty)
+            seat = dict({'entry': group[0], 'middle': group[1], 'exit': group[-1]}[row])
+            seat.update(straight=g, color=color, votes=99, reveal=reveal)
+            if self._seat_id(seat) in taken:
+                self.get_logger().error(f'sim_obstacles: "{entry}" -- seat taken twice. Skipped.')
+                continue
+            taken.add(self._seat_id(seat))
+            (self.sim_hidden if reveal > 0.0 else self.sim_seats).append(seat)
             self.get_logger().warn(
-                f'SIMULATED pylon #{self._seat_id(seat)} ({parts[2]}) on the start straight, '
-                f'{parts[1]} seat at ({seat["p"][0]:+.2f}, {seat["p"][1]:+.2f}) -- test only!')
+                f'SIMULATED pylon #{self._seat_id(seat)} ({color}) on straight s{k}, '
+                f'{row} {col} seat at ({seat["p"][0]:+.2f}, {seat["p"][1]:+.2f})'
+                f'{", appears at %.2f m" % reveal if reveal > 0.0 else ""} -- test only!')
         self._publish_obstacles_if_changed()
 
     def _seat_allowed(self, seat_group, column):
