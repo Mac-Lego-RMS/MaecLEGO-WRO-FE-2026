@@ -557,7 +557,7 @@ class Round1Controller(Node):
         # close to the wall in the first two moves -> start 1.5 cm further back.
         'park_offset_long_ccw':     ('park_offset_long_ccw',     -0.015, float),
         'park_offset_lat_ccw':      ('park_offset_lat_ccw',      0.0, float),
-        'park_offset_long_cw':      ('park_offset_long_cw',      -0.045, float),
+        'park_offset_long_cw':      ('park_offset_long_cw',      -0.025, float),
         'park_offset_lat_cw':       ('park_offset_lat_cw',       -0.01, float),
         # --- /localization_state -------------------------------------------
         # With 'recovering'/'lost' at most this fast (curvature stays the same).

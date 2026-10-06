@@ -316,10 +316,24 @@ def match_walls(measured, map_walls, pose,
                         'map': (a_map, d_map),
                         'map_index': j,
                         'innov_alpha': innov_a,
-                        'innov_d': innov_d}
+                        'innov_d': innov_d,
+                        'length': (float(np.hypot(*(np.asarray(m_end, dtype=float)
+                                                    - np.asarray(m_start, dtype=float))))
+                                   if has_endpoints else 0.0)}
         if best is not None:
             matches.append(best)
-    return matches
+    # One map wall, one match: the LONGEST segment. A wall with a kink comes
+    # out as two segments with slightly different angles -- the line of the
+    # far piece, extended to the robot, lies cm off. Both used to go to the
+    # EKF for the same map wall: the front wall of the practice field (3 deg
+    # kink 1.2 m to the side) gave 1.66 and 1.71-1.78 m, and the pose jumped
+    # by up to 6 cm along at standstill before parking (only_parken_65-67).
+    longest = {}
+    for m in matches:
+        k = m['map_index']
+        if k not in longest or m['length'] > longest[k]['length']:
+            longest[k] = m
+    return [m for m in matches if longest[m['map_index']] is m]
 
 # unused: overlap gating removed, d-gate suffices
 def _robot_point_to_map(p_robot, pose):
