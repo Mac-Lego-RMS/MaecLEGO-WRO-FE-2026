@@ -557,8 +557,8 @@ class Round1Controller(Node):
         # close to the wall in the first two moves -> start 1.5 cm further back.
         'park_offset_long_ccw':     ('park_offset_long_ccw',     -0.015, float),
         'park_offset_lat_ccw':      ('park_offset_lat_ccw',      0.0, float),
-        'park_offset_long_cw':      ('park_offset_long_cw',      -0.030, float),
-        'park_offset_lat_cw':       ('park_offset_lat_cw',       -0.025, float),
+        'park_offset_long_cw':      ('park_offset_long_cw',      -0.045, float),
+        'park_offset_lat_cw':       ('park_offset_lat_cw',       -0.01, float),
         # --- /localization_state -------------------------------------------
         # With 'recovering'/'lost' at most this fast (curvature stays the same).
         'v_loc_uncertain':          ('v_loc_uncertain',          0.20, float),
@@ -827,6 +827,8 @@ class Round1Controller(Node):
         self.park_origin = None       # pose before unparking (bay position)
         self.park_start = None        # pose AFTER unparking = park start
         self.unpark_end_pose = None   # pose right after the last unpark move
+        self.corner_msgs = 0          # /corner_geometry messages (a new one = map switched)
+        self.unpark_end_corner_msgs = 0
         # Shaft position from the last ack (0.1-deg counter of the ESP,
         # absolute since boot). Within a move sequence the shaft does not turn
         # between two moves -- the difference is then EXACTLY the rotation of
@@ -1632,6 +1634,7 @@ class Round1Controller(Node):
             self._assert_edge_convention(corners, walls)
         self.corners = corners
         self.walls = walls
+        self.corner_msgs += 1
         # inner band may have arrived FIRST (both topics are latched) -- then the
         # widths could not be computed yet. Do it now.
         if self.inner_walls is not None and self.lane_width is None:
@@ -2799,6 +2802,7 @@ class Round1Controller(Node):
         self._unpark_pid(self.unpark_pid_after)
         self.publish_stop()
         self.unpark_end_pose = (x, y, theta)   # comparison after the scan hold
+        self.unpark_end_corner_msgs = self.corner_msgs
         self.get_logger().info(
             "Unparking done: pose (%.2f, %.2f), heading %+.1f deg."
             % (x, y, math.degrees(theta)))
@@ -3719,7 +3723,19 @@ class Round1Controller(Node):
                     "Map change during the scan hold: pose jumped by %.1f cm / %+.1f deg "
                     "(robot was standing still)."
                     % (jump * 100, math.degrees(dth)))
-                if self.park_origin is not None:
+                # Only a MAP SWITCH (new /corner_geometry during the hold)
+                # moves the bay in map coordinates. Without one the jump is
+                # the wall matching correcting the dead reckoning of the
+                # unpark moves -- the bay stays where the map was anchored.
+                # Shifted along anyway, the park start moved by the jump:
+                # only_parken_65, jump 2.9 cm -> started 3.1 cm too far back
+                # (62: +1.7, 63: +1.1 cm too far forward).
+                map_switched = self.corner_msgs != self.unpark_end_corner_msgs
+                if jump > 0.005 and not map_switched:
+                    self.get_logger().info(
+                        "No map switch during the hold -- the jump is the localisation "
+                        "correcting the unpark moves; the bay pose stays.")
+                if self.park_origin is not None and map_switched:
                     # rigid transform old -> new applied to the bay pose
                     ux, uy, uth = self.park_origin
                     c, sn = math.cos(dth), math.sin(dth)
