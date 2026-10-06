@@ -1670,7 +1670,20 @@ class ScanProcessor(Node):
         of such a short piece far off to the side by 10 cm -- so take the
         position of the piece's midpoint in the driving direction. The robot
         stands parallel in the bay; the rest drops out later in the wall
-        matching. The bay walls (0.20 m, ~0.24 m ahead) drop out by distance."""
+        matching. The bay walls (0.20 m, ~0.24 m ahead) drop out by distance.
+
+        The midpoint lies 1.4-1.9 m to the side: every degree the robot stands
+        askew in the bay moves its x by ~3 cm (only_parken_84/85: -0.7 vs
+        0.0 deg -> fronts 1.943 / 1.967 for the same placement). So the
+        position along the driving direction, with the yaw from the longest
+        side wall at inner-wall distance (as precise as the bay pose itself)."""
+        side = [w for w in measured
+                if abs(abs(wrap(w[0])) - np.pi / 2.0) < SIDE_ALPHA_TOL
+                and BAY_INNER_MIN <= abs(w[1]) <= BAY_INNER_MAX]
+        yaw = 0.0
+        if side:
+            ws = max(side, key=lambda w: np.hypot(*(np.asarray(w[3]) - np.asarray(w[2]))))
+            yaw = wrap(ws[0] - np.copysign(np.pi / 2.0, ws[0]))
         best = None
         for w in measured:
             if abs(wrap(w[0] - np.pi)) >= FRONT_ALPHA_TOL:
@@ -1679,10 +1692,12 @@ class ScanProcessor(Node):
             if float(np.hypot(*(p2 - p1))) < 0.25:
                 continue
             x_mid = 0.5 * float(p1[0] + p2[0])
+            y_mid = 0.5 * float(p1[1] + p2[1])
             if x_mid < FRONT_MIN_DIST:
                 continue
-            if best is None or x_mid < best:
-                best = x_mid
+            along = x_mid * np.cos(yaw) + y_mid * np.sin(yaw)
+            if best is None or along < best:
+                best = float(along)
         return best
 
     @staticmethod
