@@ -104,6 +104,7 @@ from std_msgs.msg import Empty, String
 import cv2
 
 from camera_lidar_fusion import colors
+from camera_lidar_fusion import ring_colors
 from camera_lidar_fusion.fisheye_model import (
     FisheyeCalib, project, scan_to_points, theta_to_radius, visible_mask,
 )
@@ -212,6 +213,17 @@ class LidarPixelMapper(Node):
         # height  = at a fixed height above the lidar plane, then
         #           sample_height_m counts. Only needed if the lens does NOT
         #           sit between the mat and the pylon top.
+        # 'ring' (CSI camera): colour per pylon-sized LiDAR cluster from the
+        # colour areas in the fisheye ring, relative to the white mat -- see
+        # ring_colors.py. 'zone' / the old paths stay for the USB camera.
+        self.declare_parameter('color_mode', 'zone')
+        self.declare_parameter('ring_lens_height_m', 0.085)   # lens above the mat
+        self.declare_parameter('ring_max_dist_m', 1.2)
+        self.declare_parameter('ring_min_dist_m', 0.25)       # closer = our own build
+        self.declare_parameter('ring_az_tol_deg', 3.0)
+        self.declare_parameter('ring_lat_tol_m', 0.04)
+        self.declare_parameter('ring_cluster_gap_m', 0.05)
+        self.declare_parameter('ring_cluster_max_m', 0.09)    # pylon 5 cm, seen diagonally 7
         self.declare_parameter('sample_mode', 'horizon')
         self.declare_parameter('sample_height_m', 0.00)
         # Tilt the ring downwards (horizon only). 0 = horizontal through the
@@ -879,7 +891,9 @@ class LidarPixelMapper(Node):
 
         zone_low = self.get_parameter('sample_zone_low_m').value
         zone_high = self.get_parameter('sample_zone_high_m').value
-        if zone_high > zone_low or self.calib.zone_calibrated:
+        if self.get_parameter('color_mode').value == 'ring':
+            labels, bgr, hsv = self._classify_ring(image, pts_img[on_image], angles, rho_img, u, v)
+        elif zone_high > zone_low or self.calib.zone_calibrated:
             # Convert the two zone limits per point into image radii. Higher
             # edge = smaller radius (radially outwards means downwards).
             fix_in = float(self.get_parameter('sample_r_fix_in').value)
@@ -932,6 +946,55 @@ class LidarPixelMapper(Node):
                         pts, u, v, theta, phi, bgr, hsv, labels)
 
     # ---------------------------------------------------------------- #
+    def _classify_ring(self, image, pts_img, angles, rho_img, u, v):
+        """Colour per pylon-sized cluster (ring_colors). Points outside such
+        a cluster stay 'unknown' (or 'black' on the dark wall band)."""
+        n = len(angles)
+        labels = np.full(n, 'unknown', dtype=object)
+        order = np.argsort(angles)
+        gap = float(self.get_parameter('ring_cluster_gap_m').value)
+        max_w = float(self.get_parameter('ring_cluster_max_m').value)
+        groups, cur = [], [order[0]] if n else []
+        for a_i, b_i in zip(order[:-1], order[1:]):
+            if np.hypot(*(pts_img[b_i, :2] - pts_img[a_i, :2])) > gap:
+                groups.append(cur)
+                cur = []
+            cur.append(b_i)
+        if cur:
+            groups.append(cur)
+        # first and last group belong together if the scan closes the circle
+        if len(groups) > 1 and np.hypot(*(pts_img[groups[0][0], :2] - pts_img[groups[-1][-1], :2])) <= gap:
+            groups[0] = groups[-1] + groups[0]
+            groups.pop()
+        clusters, members = [], []
+        for g in groups:
+            if len(g) < 3:
+                continue
+            xy = pts_img[g, :2]
+            if np.hypot(*(xy.max(0) - xy.min(0))) > max_w:
+                continue
+            c = xy.mean(0)
+            uu, vv, _, _, _ = project(self.calib, np.array([[c[0], c[1], self.calib.cam_z]]))
+            clusters.append((math.degrees(math.atan2(float(vv[0]) - self.calib.cy,
+                                                     float(uu[0]) - self.calib.cx)),
+                             float(np.hypot(c[0] - self.calib.cam_x, c[1] - self.calib.cam_y))))
+            members.append(g)
+        bgr, hsv = colors.sample_colors(image, u, v, 3)
+        labels[hsv[:, 2] <= 45] = 'black'
+        if clusters:
+            maps = ring_colors.colour_maps(image, self.calib.cx, self.calib.cy, self.calib.radius_px)
+            found = ring_colors.assign(
+                ring_colors.blobs(maps), clusters, self.calib.radius_px, self.calib.focal_px,
+                lens_m=float(self.get_parameter('ring_lens_height_m').value),
+                az_tol_deg=float(self.get_parameter('ring_az_tol_deg').value),
+                lat_tol_m=float(self.get_parameter('ring_lat_tol_m').value),
+                max_dist_m=float(self.get_parameter('ring_max_dist_m').value),
+                min_dist_m=float(self.get_parameter('ring_min_dist_m').value))
+            for g, lab in zip(members, found):
+                if lab:
+                    labels[g] = lab
+        return labels.tolist(), bgr, hsv
+
     def _publish_summary(self, labels):
         counts = {}
         for label in labels:

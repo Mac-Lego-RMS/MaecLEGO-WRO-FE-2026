@@ -44,6 +44,15 @@ Parameters (ros2 param set /video_source <name> <value>):
   latency_ms      stamp = arrival time minus this (exposure + ISP)
   shading         colour shading correction on/off (default on)
   shading_file    calibration from src/csi_shading_calib.py
+  enhance         radial saturation + local contrast on/off (default on)
+  enhance_sat_center / enhance_sat_edge
+                  chroma gain in the centre / at the edge of the circle
+                  (default 1.5 / 3.5 = "medium"; 1.8 / 4.5 = "strong")
+  enhance_r0      radius (fraction of the circle) where the rise to the
+                  edge gain starts
+  enhance_edge    no chroma boost where the luminance jumps by more than about
+                  this (grey levels, 0 = off) -- suppresses colour fringes
+  enhance_clahe   CLAHE clip limit on the luminance, 0 = off
 
 Colour shading: the PiCam 360 fisheye on the IMX219 does not match the
 sensor's micro lenses (chief ray angle). Towards the edge of the circle green
@@ -52,6 +61,18 @@ ring where the field is turns magenta. Argus' lens shading is tuned for the
 stock lens and cannot fix it, a global white balance neither. So a radial
 per-channel gain map (from the calibration file) is applied to every frame:
 one cv2.multiply, ~4 ms at 1280x960.
+
+Enhancement: the gain map fixes the hue, not the saturation. The light that
+hits the sensor at a steep angle partly lands in the neighbouring pixel of
+another colour (crosstalk), so colours fade towards grey at the edge -- a
+green pylon in the ring came out at S 30, below s_min 50 of colors.py. After
+the shading, the chroma (Cr/Cb, at half resolution like the NV12 it came
+from) is lightly denoised and multiplied by a radial gain (not across
+brightness edges), and CLAHE lifts the local contrast of the luminance. The
+same pylon: S 30 -> ~75 (medium), hue unchanged. Needs an accurate shading
+calibration first -- any rest tint is amplified as well. The thresholds in
+colors.py were tuned on unenhanced images: brown wood can now reach the red
+s_min, check them in the arena.
 """
 import array
 import os
@@ -100,6 +121,12 @@ class CsiCamera(Node):
         d('frame_id', '')
         d('shading', True)
         d('shading_file', '/workspace/config/csi_shading.npz')
+        d('enhance', True)
+        d('enhance_sat_center', 1.5)
+        d('enhance_sat_edge', 3.5)
+        d('enhance_r0', 0.45)
+        d('enhance_edge', 25.0)
+        d('enhance_clahe', 2.0)
 
         qos = QoSProfile(depth=2, reliability=ReliabilityPolicy.RELIABLE,
                          history=HistoryPolicy.KEEP_LAST)
@@ -118,8 +145,11 @@ class CsiCamera(Node):
         self.fails = 0
 
         self.shade = None             # uint8 gain map, gain * 64, per pixel and channel
+        self.circle = None            # (cx, cy, R) at the published size, from the shading file
+        self.enh = None               # (chroma gain map at half size, CLAHE or None)
         self.shade_reload = False
         self._load_shading()
+        self._load_enhance()
         self.add_on_set_parameters_callback(self._on_params)
         self.create_timer(0.2, self._poll)
         self._start()
@@ -160,6 +190,82 @@ class CsiCamera(Node):
                 f'{", vignetting up to x%.2f" % lum.max() if "pl" in c.files else ""}')
         except Exception as err:      # a broken file must not stop the camera
             self.get_logger().error(f'colour shading correction: {path} unusable ({err})')
+
+    def _load_enhance(self):
+        """Radial chroma gain (half size, like the chroma) and CLAHE."""
+        self.enh = None
+        if not self._p('enhance'):
+            self.get_logger().info('enhancement: off')
+            return
+        w, h = int(self._p('width')), int(self._p('height'))
+        try:                          # circle from the shading calibration
+            c = np.load(self._p('shading_file'))
+            k = w / float(c['width'])
+            cx, cy, rad = float(c['cx']) * k, float(c['cy']) * k, float(c['R']) * k
+        except Exception:
+            # 1280x960: circle of the IMX219 + fisheye as calibrated on 2026-10-06
+            cx, cy, rad = 0.511 * w, 0.4875 * h, 0.445 * w
+            self.get_logger().warn('enhancement: no circle in the shading file, '
+                                   f'assuming centre ({cx:.0f}, {cy:.0f}), radius {rad:.0f} px')
+        yy, xx = np.mgrid[0:h // 2, 0:w // 2].astype(np.float32)
+        r = np.hypot(xx * 2 + 0.5 - cx, yy * 2 + 0.5 - cy) / rad
+        s0, s1 = float(self._p('enhance_sat_center')), float(self._p('enhance_sat_edge'))
+        r0 = min(float(self._p('enhance_r0')), 0.9)
+        t = np.clip((r - r0) / (0.95 - r0), 0.0, 1.0)
+        t = t * t * (3.0 - 2.0 * t)   # smoothstep
+        boost = (s0 - 1.0 + (s1 - s0) * t).astype(np.float32)
+        # back to grey beyond the rim of the circle: there is only dark noise,
+        # and the boost turned the edge of the bright mat into a magenta fringe
+        rim = np.clip((1.01 - r) / 0.05, 0.0, 1.0).astype(np.float32)
+        edge = float(self._p('enhance_edge'))
+        clip = float(self._p('enhance_clahe'))
+        clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(8, 8)) if clip > 0.0 else None
+        self.enh = (boost, rim, edge, clahe)
+        self.get_logger().info(
+            f'enhancement: chroma x{s0:.2f} in the centre -> x{s1:.2f} at the edge '
+            f'(from r {r0:.2f}), edge damping {edge if edge > 0 else "off"}, '
+            f'CLAHE {"off" if clahe is None else clip}')
+
+    def _enhance(self, bgr):
+        boost, rim, edge, clahe = self.enh
+        h, w = bgr.shape[:2]
+        half = (w // 2, h // 2)
+        if boost.shape[:2] != (half[1], half[0]):
+            return bgr
+        y, cr, cb = cv2.split(cv2.cvtColor(bgr, cv2.COLOR_BGR2YCrCb))
+        # Chroma at half size, edge-preserving denoise first (the gain
+        # amplifies the noise as well). A 3x3 median instead of a bilateral
+        # filter: same image (0.6 grey levels apart), 1 ms instead of 21 ms
+        # on the Orin Nano. Rounding to 8 bit at half size too (10 ms at full).
+        c = cv2.merge([cv2.medianBlur(cv2.resize(ch, half, interpolation=cv2.INTER_AREA), 3)
+                       for ch in (cr, cb)]).astype(np.float32)
+        if edge > 0.0:
+            # No boost across brightness edges: the chroma there is the
+            # half-size chroma smeared over the edge (magenta/green fringes
+            # along every dark/bright border), not the colour of an object.
+            # Weight 1 / (1 + (local max-min of Y / edge)^2). In the room
+            # test the false green in the ring fell from 2.7 to 0.6 percent,
+            # the pylon kept S 74 of 78.
+            e = cv2.morphologyEx(cv2.resize(y, half, interpolation=cv2.INTER_AREA),
+                                 cv2.MORPH_GRADIENT, np.ones((5, 5), np.uint8))
+            e = e.astype(np.float32)
+            e *= 1.0 / edge
+            e *= e
+            e += 1.0
+            g = boost / e
+        else:
+            g = boost.copy()
+        g += 1.0
+        g *= rim
+        c -= 128.0
+        c *= cv2.merge([g, g])
+        c += 128.0
+        np.clip(c, 0.0, 255.0, out=c)
+        cr, cb = cv2.split(cv2.resize(c.astype(np.uint8), (w, h),
+                                      interpolation=cv2.INTER_LINEAR))
+        if clahe is not None:
+            y = clahe.apply(y)
+        return cv2.cvtColor(cv2.merge([y, cr, cb]), cv2.COLOR_YCrCb2BGR)
 
     # ------------------------------------------------------------ pipeline
     def _p(self, name):
@@ -259,6 +365,8 @@ class CsiCamera(Node):
         shade = self.shade
         if shade is not None and shade.shape == bgr.shape:
             bgr = cv2.multiply(bgr, shade, scale=1.0 / 64.0)
+        if self.enh is not None:
+            bgr = self._enhance(bgr)
         msg = Image()
         lat = int(float(self._p('latency_ms')) * 1e6)
         msg.header.stamp = (t_now - Duration(nanoseconds=lat)).to_msg()
@@ -283,6 +391,7 @@ class CsiCamera(Node):
         if self.shade_reload:
             self.shade_reload = False
             self._load_shading()
+            self._load_enhance()
         if self.restart_at is not None and now >= self.restart_at:
             self.restart_at = None
             self._stop()
@@ -326,7 +435,8 @@ class CsiCamera(Node):
                 self._schedule_restart()
 
     def _on_params(self, params):
-        if any(p.name in ('shading', 'shading_file', 'width', 'height') for p in params):
+        if any(p.name in ('shading', 'shading_file', 'width', 'height')
+               or p.name.startswith('enhance') for p in params):
             self.shade_reload = True      # after the callback has stored the values
         if any(p.name in PIPELINE_PARAMS for p in params):
             # apply after the callback has stored the values

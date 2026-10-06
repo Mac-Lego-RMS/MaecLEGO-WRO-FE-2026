@@ -566,7 +566,8 @@ def classify_zone(image_bgr: np.ndarray, phi: np.ndarray, r_inner: np.ndarray,
 
 
 def find_color_blob(image_bgr: np.ndarray, ranges: dict = None, min_area: int = 300,
-                    mask_circle=None, only_label: str = '', max_area: int = 0):
+                    mask_circle=None, only_label: str = '', max_area: int = 0,
+                    extra_mask=None):
     """Looks for the largest red/green/magenta blob in the image.
 
     ``mask_circle`` is optional (cx, cy, radius) and masks out everything outside
@@ -604,6 +605,8 @@ def find_color_blob(image_bgr: np.ndarray, ranges: dict = None, min_area: int = 
             )
         if roi is not None:
             mask = cv2.bitwise_and(mask, roi)
+        if extra_mask is not None:          # e.g. "changed against the empty scene"
+            mask = cv2.bitwise_and(mask, extra_mask)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
 
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)

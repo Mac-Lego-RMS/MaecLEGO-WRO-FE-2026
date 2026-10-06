@@ -79,6 +79,15 @@ class RotationCalibration(Node):
         self.declare_parameter('blob_min_area_px', 300)
         # Upper limit against large objects in the room. 0 = off.
         self.declare_parameter('blob_max_area_px', 0)
+        # Only blobs from this fraction of the circle radius outwards (0 = all).
+        # The pylons stand in the outer ring; the room above (posters,
+        # cloths, the ceiling lamp) is in the inner part.
+        self.declare_parameter('blob_ring_min_frac', 0.55)
+        # With "background" an image of the empty scene is stored too; then
+        # only colour that CHANGED against it counts (min. difference per
+        # channel). A red cloth on the wall or a green label on a poster
+        # stays the same and drops out. 0 = off.
+        self.declare_parameter('blob_change_min', 30)
         # Pin it to the colour of the calibration pylon: 'red', 'green' or
         # 'magenta'. Empty = largest blob of any colour -- in a furnished room
         # that almost always picks the wrong thing.
@@ -312,12 +321,25 @@ class RotationCalibration(Node):
     def find_target_blob(self):
         if self.latest_image is None:
             return None
+        img = self.latest_image
+        extra = np.full(img.shape[:2], 255, np.uint8)
+        frac = float(self.get_parameter('blob_ring_min_frac').value)
+        if frac > 0.0:
+            cv2.circle(extra, (int(round(self.calib.cx)), int(round(self.calib.cy))),
+                       int(round(frac * self.calib.radius_px)), 0, -1)
+        change = int(self.get_parameter('blob_change_min').value)
+        bg = getattr(self, 'background_image', None)
+        if change > 0 and bg is not None and bg.shape == img.shape:
+            diff = cv2.absdiff(img, bg).max(axis=2)
+            moved = cv2.dilate((diff >= change).astype(np.uint8) * 255, np.ones((7, 7), np.uint8))
+            extra = cv2.bitwise_and(extra, moved)
         return colors.find_color_blob(
-            self.latest_image, self.ranges,
+            img, self.ranges,
             min_area=self.get_parameter('blob_min_area_px').value,
             mask_circle=(self.calib.cx, self.calib.cy, self.calib.radius_px),
             only_label=self.get_parameter('target_label').value,
-            max_area=self.get_parameter('blob_max_area_px').value)
+            max_area=self.get_parameter('blob_max_area_px').value,
+            extra_mask=extra)
 
     # ------------------------------------------------------------------ #
     # Commands
@@ -617,6 +639,8 @@ class RotationCalibration(Node):
                 np.where(finite[:, has_any], stack[:, has_any], np.nan), axis=0)
 
         self.background = reference
+        if self.latest_image is not None:
+            self.background_image = self.latest_image.copy()   # see blob_change_min
         self.background_buffer.clear()
         self.background_collecting = False
 

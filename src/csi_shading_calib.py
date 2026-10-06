@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Calibrate the colour shading of the CSI camera (IMX219 + fisheye).
 
-Run in the container while the camera node (window 3) is running:
+Run in the container while the camera node (window 3) is running (the
+enhancement of the node is switched off during the calibration):
 
     python3 /workspace/src/csi_shading_calib.py --flat     # best
     python3 /workspace/src/csi_shading_calib.py            # from the room
@@ -39,10 +40,14 @@ def set_param(name, value):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
 
 
-def get_param(name):
+def get_param_text(name):
     out = subprocess.run(['ros2', 'param', 'get', '/video_source', name],
                          capture_output=True, text=True, timeout=15).stdout
-    return float(out.strip().split()[-1])
+    return out.strip().split()[-1] if out.strip() else ''
+
+
+def get_param(name):
+    return float(get_param_text(name))
 
 
 def expose_for_flat():
@@ -116,6 +121,18 @@ def main():
     ap.add_argument('--gain-max', type=float, default=2.5, help='cap of the brightness gain at the edge')
     a = ap.parse_args()
 
+    # the enhancement (chroma gain, CLAHE) would distort the measurement --
+    # off for the whole calibration, back to its old value afterwards
+    enhance_old = get_param_text('enhance')
+    set_param('enhance', 'false')
+    try:
+        calibrate(a)
+    finally:
+        if enhance_old in ('True', 'False'):
+            set_param('enhance', enhance_old.lower())
+
+
+def calibrate(a):
     set_param('shading', 'false')
     time.sleep(1.0)
     old = expose_for_flat() if a.flat else None
