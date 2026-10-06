@@ -167,6 +167,7 @@ FRONT_MIN_LEN = 0.50           # front wall is 3 m long, the bay wall 0.20 m
 FRONT_MIN_DIST = 0.60          # the bay is never right at the corner
 INNER_END_FREE = 0.30          # beams past the inner wall end must reach this much further
 BAY_VOTES_INNER_END = 11       # votes (median) when the front comes from the inner wall end
+POSE_RESET_WAIT = 1.0          # s to wait for the zeroed EKF pose after the button
 BAY_SIDE_MIN_LEN = 0.15        # shorter pieces are no wall for the side test (pylon 5 cm)
 PYLON_MAX_EXTENT = 0.08        # a pylon cluster is at most this large
 PYLON_HALF = 0.025             # seen face -> centre of the 5 cm pylon
@@ -346,6 +347,7 @@ class ScanProcessor(Node):
         self.loc_state = None        # last published state
         self.perf = {}               # timing per callback
         self.pose_hist = deque(maxlen=POSE_HIST_LEN)   # (stamp, pose)
+        self.pose_reset_until = None    # after the button: wait for the zeroed EKF pose
         self.perf_t = time.monotonic()
 
         self.pose = (0.0, 0.0, 0.0)
@@ -464,6 +466,20 @@ class ScanProcessor(Node):
         x = msg.pose.pose.position.x
         y = msg.pose.pose.position.y
         theta = yaw_from_quaternion(msg.pose.pose.orientation)
+        if self.pose_reset_until is not None:
+            # After the button the EKF zeroes its pose (ekf_node button_cb).
+            # Odometry still under way from before must not get into the
+            # anchoring -- wait for the zeroed pose.
+            if abs(x) < 0.02 and abs(y) < 0.02 and abs(theta) < np.radians(2.0):
+                self.pose_reset_until = None
+            elif time.monotonic() < self.pose_reset_until:
+                return
+            else:
+                self.pose_reset_until = None
+                self.get_logger().warn(
+                    f'EKF pose not zeroed after the button (still {x:+.2f} / {y:+.2f} m, '
+                    f'{np.degrees(theta):+.1f} deg) -- old ekf_node without reset_on_button? '
+                    f'The map is anchored at this pose.')
         self.pose = (x, y, theta)
         self.yaw_rate = float(msg.twist.twist.angular.z)
         t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
@@ -523,6 +539,8 @@ class ScanProcessor(Node):
     # ------------------------------------------------------------------ #
 
     def scan_cb(self, msg):
+        if self.pose_reset_until is not None:
+            return                      # no start detection with the pose from before the button
         if not self.started:
             if not self.armed_sent:
                 self.armed_sent = True
@@ -542,6 +560,9 @@ class ScanProcessor(Node):
         if self.started:
             return
         self.started = True
+        self.pose = (0.0, 0.0, 0.0)
+        self.pose_hist.clear()
+        self.pose_reset_until = time.monotonic() + POSE_RESET_WAIT
         self.get_logger().info('Start button -- start detection running.')
 
     def _timed(self, kind, msg, fn):

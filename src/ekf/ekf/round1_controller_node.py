@@ -548,8 +548,8 @@ class Round1Controller(Node):
         # close to the wall in the first two moves -> start 1.5 cm further back.
         'park_offset_long_ccw':     ('park_offset_long_ccw',     -0.015, float),
         'park_offset_lat_ccw':      ('park_offset_lat_ccw',      0.0, float),
-        'park_offset_long_cw':      ('park_offset_long_cw',      0.0, float),
-        'park_offset_lat_cw':       ('park_offset_lat_cw',       -0.03, float),
+        'park_offset_long_cw':      ('park_offset_long_cw',      -0.015, float),
+        'park_offset_lat_cw':       ('park_offset_lat_cw',       0.0, float),
         # --- /localization_state -------------------------------------------
         # With 'recovering'/'lost' at most this fast (curvature stays the same).
         'v_loc_uncertain':          ('v_loc_uncertain',          0.20, float),
@@ -3975,6 +3975,11 @@ class Round1Controller(Node):
     def button_cb(self, msg):
         """The bridge publishes a Header (not a Bool) on every button press.
         The message itself IS the event."""
+        if not self.button_pressed and self.park_origin is None:
+            # The EKF zeroes its pose at this press (ekf_node button_cb):
+            # travel from carrying and setting down before it does not count.
+            self.odo_travel_before = 0.0
+            self.odo_travel_t = None
         self.button_pressed = True
 
     # ------------------------------------------------------------- helpers

@@ -35,7 +35,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Imu, JointState
 from nav_msgs.msg import Odometry
 from rclpy.qos import QoSProfile, DurabilityPolicy
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Header
 
 from robot_msgs.msg import WallMatchArray
 
@@ -110,6 +110,21 @@ class EKFNode(Node):
                                  self.enc_cb, 50)
         self.create_subscription(WallMatchArray, '/wall_matches', self.wall_cb, 10)
         self.pub = self.create_publisher(Odometry, '/ekf/odom', 10)
+
+        # Start button: zero the pose ONCE, at the first press. The map is
+        # anchored at the EKF pose of the start detection, and the
+        # controller assumes the start straight is map +x. If the robot is
+        # carried and set down AFTER the EKF started, the gyro integrates
+        # the turn: in only_parken_57 the EKF stood at +41 deg, the map came
+        # out rotated by that, no front wall was found (/front_wall_x never
+        # came) and the robot stopped after unparking. Only the first press:
+        # a later one must not throw the pose away in the middle of a run.
+        self.declare_parameter('reset_on_button', True,
+                               ParameterDescriptor(dynamic_typing=True))
+        self._button_reset_done = False
+        if bool(self.get_parameter('reset_on_button').value):
+            self.create_subscription(Header, '/esp_serial_bridge/button',
+                                     self.button_cb, 10)
 
         # The filter still updates on every measurement (gyro ~93 Hz, encoder
         # ~108 Hz) -- but publishing runs on a timer. Before, one Odometry went
@@ -257,6 +272,21 @@ class EKFNode(Node):
                     f'stale measurement dropped: dt={dt*1e3:.2f} ms, '
                     f'kind={kind} (total {self.n_dropped})',
                     throttle_duration_sec=1.0)
+
+    def button_cb(self, _msg):
+        if self._button_reset_done:
+            return
+        self._button_reset_done = True
+        x, y, th = (float(v) for v in self.ekf.x[0:3])
+        self.ekf.x[0:3] = 0.0
+        self.ekf.P[0:3, :] = 0.0
+        self.ekf.P[:, 0:3] = 0.0
+        for k in range(3):
+            self.ekf.P[k, k] = 1e-3
+        self.get_logger().info(
+            f'Start button: pose zeroed (was {x * 100:+.1f} / {y * 100:+.1f} cm, '
+            f'{np.degrees(th):+.1f} deg).')
+        self._mark(self.last_processed if self.last_processed is not None else 0.0)
 
     # --- wall correction: applied to current state (approach B) -----------
     def wall_cb(self, msg):
