@@ -2,7 +2,8 @@
 """Obstacle layout for runs without camera: a small web page on the Jetson.
 
     python3 ~/ros2_ws/src/sim_obstacles_gui.py          (or: simgui)
-    -> open http://<jetson>:8765 in the browser (Mac, phone, ...)
+    -> open http://<jetson>:8780 in the browser (Mac, phone, ...)
+       (not 8765: that is the foxglove_bridge)
 
 Click seats to place red / green pylons, roll random layouts, mark pylons that
 only appear late (when the robot is X cm away -- like a pylon the camera sees
@@ -251,7 +252,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--port', type=int, default=8765)
+    ap.add_argument('--port', type=int, default=8780)   # 8765 = foxglove_bridge
     ap.add_argument('--random', action='store_true', help='write a random layout and exit')
     ap.add_argument('--seed', type=int)
     ap.add_argument('--min', type=int, default=1, help='pylons per straight, min')
@@ -265,7 +266,13 @@ def main():
         print('\n'.join(entries))
         print('-> %s' % LAYOUT_FILE)
         return
-    srv = ThreadingHTTPServer(('0.0.0.0', a.port), Handler)
+    ThreadingHTTPServer.allow_reuse_address = True
+    try:
+        srv = ThreadingHTTPServer(('0.0.0.0', a.port), Handler)
+    except OSError as err:
+        print('Port %d not free (%s) -- already running, or another program '
+              '(8765 = foxglove_bridge). Other port: simgui --port 8781' % (a.port, err))
+        return 1
     host = os.uname().nodename
     print('Obstacle GUI: http://%s:%d  (file %s) -- Ctrl-C to stop' % (host, a.port, LAYOUT_FILE), flush=True)
     try:

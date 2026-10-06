@@ -8,7 +8,7 @@
 #   rlog            start-up log of robot.service in this boot
 #   rmode [open|obstacle] [auto|noauto]
 #                   show / set config/race.env (takes effect with rs or a reboot)
-#   simgui [args]   obstacle layout in the browser, http://<jetson>:8765
+#   simgui [args]   obstacle layout in the browser, http://<jetson>:8780
 #                   (start the controller with -p sim_obstacles:=file);
 #                   simgui --random [--late 30] writes a random layout at once
 
