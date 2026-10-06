@@ -143,12 +143,14 @@ CAM_HEIGHT=960
 CAM_FPS=15.0
 
 # CSI camera (CAMERA=csi): fixed Argus values. Exposure in ms (at 15 Hz up to
-# 66), analog gain 1..16, white balance 1 = auto and locked after 3 s
-# (5 = daylight, 0 = off). STARTING values for the new IMX219 -- calibrate at
-# the field. Doubles written as doubles (ROS parameter types).
+# 66), analog gain 1..16, white balance 0 = off (1 = auto, locked after 3 s;
+# 5 = daylight). Off: the colour comes from the shading calibration
+# (src/csi_shading_calib.py) and stays the same at every start -- auto locked
+# differently each time (edge R/G 1.56 vs 1.75). STARTING values for the
+# IMX219 -- calibrate at the field. Doubles written as doubles (ROS types).
 CSI_EXPOSURE_MS=20.0
 CSI_GAIN=2.0
-CSI_WBMODE=1
+CSI_WBMODE=0
 CSI_SATURATION=1.0
 
 # Exposure of the fisheye camera. exposure_time_absolute counts in 100 us

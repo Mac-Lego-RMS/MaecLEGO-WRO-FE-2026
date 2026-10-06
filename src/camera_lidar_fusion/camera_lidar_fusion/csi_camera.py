@@ -42,11 +42,23 @@ Parameters (ros2 param set /video_source <name> <value>):
   tnr_mode        temporal noise reduction 0 off / 1 fast / 2 high quality
   flip_method     nvvidconv flip (0 none, 2 rotate 180, ...)
   latency_ms      stamp = arrival time minus this (exposure + ISP)
+  shading         colour shading correction on/off (default on)
+  shading_file    calibration from src/csi_shading_calib.py
+
+Colour shading: the PiCam 360 fisheye on the IMX219 does not match the
+sensor's micro lenses (chief ray angle). Towards the edge of the circle green
+falls off against red and blue -- R/G 1.0 in the centre, 1.55 at the edge, the
+ring where the field is turns magenta. Argus' lens shading is tuned for the
+stock lens and cannot fix it, a global white balance neither. So a radial
+per-channel gain map (from the calibration file) is applied to every frame:
+one cv2.multiply, ~4 ms at 1280x960.
 """
 import array
+import os
 import threading
 import time
 
+import cv2
 import numpy as np
 import rclpy
 from rclpy.duration import Duration
@@ -78,7 +90,7 @@ class CsiCamera(Node):
         d('framerate', 15.0)
         d('exposure_ms', 30.0)
         d('gain', 1.0)
-        d('wbmode', 1)
+        d('wbmode', 0)
         d('awb_lock_after_s', 3.0)
         d('saturation', 1.0)
         d('ee_mode', 0)
@@ -86,6 +98,8 @@ class CsiCamera(Node):
         d('flip_method', 0)
         d('latency_ms', 40.0)
         d('frame_id', '')
+        d('shading', True)
+        d('shading_file', '/workspace/config/csi_shading.npz')
 
         qos = QoSProfile(depth=2, reliability=ReliabilityPolicy.RELIABLE,
                          history=HistoryPolicy.KEEP_LAST)
@@ -103,9 +117,44 @@ class CsiCamera(Node):
         self.restart_at = None
         self.fails = 0
 
+        self.shade = None             # uint8 gain map, gain * 64, per pixel and channel
+        self.shade_reload = False
+        self._load_shading()
         self.add_on_set_parameters_callback(self._on_params)
         self.create_timer(0.2, self._poll)
         self._start()
+
+    # ------------------------------------------------------------ shading
+    def _load_shading(self):
+        """Gain map from the calibration file, at the published size."""
+        self.shade = None
+        if not self._p('shading'):
+            self.get_logger().info('colour shading correction: off')
+            return
+        path = self._p('shading_file')
+        if not os.path.isfile(path):
+            self.get_logger().warn(f'colour shading correction: no file {path} -- '
+                                   f'run src/csi_shading_calib.py. Frames uncorrected.')
+            return
+        try:
+            c = np.load(path)
+            w, h = int(self._p('width')), int(self._p('height'))
+            k = w / float(c['width'])
+            cx, cy, rad = float(c['cx']) * k, float(c['cy']) * k, float(c['R']) * k
+            yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+            rr = np.clip(np.hypot(xx - cx, yy - cy) / rad, 0.0, 1.05) ** 2
+            gb = 1.0 / np.polyval(c['pb'], rr)
+            gr = 1.0 / np.polyval(c['pr'], rr)
+            lum = 1.0 / np.polyval(c['pl'], rr) if 'pl' in c.files else np.ones_like(rr)
+            lum = np.minimum(lum, float(c['gain_max']) if 'gain_max' in c.files else 2.5)
+            gmap = np.stack([gb * lum, lum, gr * lum], axis=2)
+            self.shade = np.clip(gmap * 64.0 + 0.5, 0, 255).astype(np.uint8)
+            self.get_logger().info(
+                f'colour shading correction from {path}: centre ({cx:.0f}, {cy:.0f}), '
+                f'radius {rad:.0f} px, edge gains R {gr.min():.2f} B {gb.min():.2f}'
+                f'{", vignetting up to x%.2f" % lum.max() if "pl" in c.files else ""}')
+        except Exception as err:      # a broken file must not stop the camera
+            self.get_logger().error(f'colour shading correction: {path} unusable ({err})')
 
     # ------------------------------------------------------------ pipeline
     def _p(self, name):
@@ -202,6 +251,9 @@ class CsiCamera(Node):
                 data[:stride * h].reshape(h, stride)[:, :w * 4].reshape(h, w, 4)[:, :, :3])
         finally:
             buf.unmap(info)
+        shade = self.shade
+        if shade is not None and shade.shape == bgr.shape:
+            bgr = cv2.multiply(bgr, shade, scale=1.0 / 64.0)
         msg = Image()
         lat = int(float(self._p('latency_ms')) * 1e6)
         msg.header.stamp = (t_now - Duration(nanoseconds=lat)).to_msg()
@@ -223,6 +275,9 @@ class CsiCamera(Node):
     # ------------------------------------------------------------ house-keeping
     def _poll(self):
         now = time.monotonic()
+        if self.shade_reload:
+            self.shade_reload = False
+            self._load_shading()
         if self.restart_at is not None and now >= self.restart_at:
             self.restart_at = None
             self._stop()
@@ -266,6 +321,8 @@ class CsiCamera(Node):
                 self._schedule_restart()
 
     def _on_params(self, params):
+        if any(p.name in ('shading', 'shading_file', 'width', 'height') for p in params):
+            self.shade_reload = True      # after the callback has stored the values
         if any(p.name in PIPELINE_PARAMS for p in params):
             # apply after the callback has stored the values
             self.restart_at = time.monotonic() + 0.1
