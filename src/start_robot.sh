@@ -149,7 +149,7 @@ CAM_FPS=15.0
 # differently each time (edge R/G 1.56 vs 1.75). STARTING values for the
 # IMX219 -- calibrate at the field. Doubles written as doubles (ROS types).
 CSI_EXPOSURE_MS=20.0
-CSI_GAIN=2.0
+CSI_GAIN=8.0
 CSI_WBMODE=0
 CSI_SATURATION=1.0
 

@@ -128,20 +128,52 @@ def main():
     yy, xx = np.mgrid[0:h, 0:w]
     r = np.hypot(xx - cx, yy - cy) / R
     lum = img.mean(axis=2)
-    rc, rg, bg, lm = [], [], [], []
     lo_r = 0.0 if a.flat else 0.12          # centre of a room scene: the ceiling lamp
-    for lo, hi in zip(np.linspace(lo_r, 0.98, 25)[:-1], np.linspace(lo_r, 0.98, 25)[1:]):
-        s = (r >= lo) & (r < hi) & (lum > 15) & (lum < 240)
-        if s.sum() < 300:
-            continue
-        g = np.maximum(img[..., 1][s], 1)
-        rc.append((lo + hi) / 2)
-        rg.append(np.median(img[..., 2][s] / g))
-        bg.append(np.median(img[..., 0][s] / g))
-        lm.append(np.median(img[..., 1][s]))
+
+    def rings(neutral):
+        """Median R/G, B/G (and green level) per ring over the selected pixels."""
+        rc, rg, bg, lm = [], [], [], []
+        edges = np.linspace(lo_r, 0.98, 25)
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            s = (r >= lo) & (r < hi) & (lum > 15) & (lum < 240)
+            if not a.flat and s.sum() >= 300:
+                # only the brighter, (after correction) weakly coloured pixels:
+                # in the outer ring that is the white field mat, where the
+                # pylons stand. Dark pixels (black walls, cables) carry a
+                # magenta tinge of their own.
+                s &= (lum >= np.percentile(lum[s], 50))
+                if neutral is not None:
+                    s &= neutral
+            if s.sum() < 300:
+                continue
+            g = np.maximum(img[..., 1][s], 1)
+            rc.append((lo + hi) / 2)
+            rg.append(np.median(img[..., 2][s] / g))
+            bg.append(np.median(img[..., 0][s] / g))
+            lm.append(np.median(img[..., 1][s]))
+        return rc, rg, bg, lm
+
+    # Two passes: the raw edge is so magenta that "weakly coloured" cannot be
+    # judged on the raw image (the white mat came out at saturation 0.4 and
+    # was thrown away). Pass 1 per ring by brightness only, correct with it,
+    # then keep the pixels that are near neutral AFTER that correction.
+    rc, rg, bg, lm = rings(None)
+    if not a.flat:
+        rn = np.clip(r, 0.0, 1.05)
+        corr = img.copy()
+        corr[..., 2] /= np.interp(rn, rc, rg)
+        corr[..., 0] /= np.interp(rn, rc, bg)
+        mx, mn = corr.max(axis=2), corr.min(axis=2)
+        rc, rg, bg, lm = rings((mx - mn) / np.maximum(mx, 1.0) < 0.25)
     rc, rg, bg, lm = map(np.array, (rc, rg, bg, lm))
+    # Table per ring (interpolated in the camera node) -- a polynomial in r^2
+    # was too stiff for the steep rise at the edge (ring still R/G 1.15).
+    # Lightly smoothed over neighbouring rings.
+    k = np.array([0.25, 0.5, 0.25])
+    sm = lambda v: np.concatenate([v[:1], np.convolve(v, k, 'valid'), v[-1:]]) if len(v) > 2 else v
     out = dict(width=w, height=h, cx=cx, cy=cy, R=R,
-               pr=np.polyfit(rc ** 2, rg, 2), pb=np.polyfit(rc ** 2, bg, 2), gain_max=a.gain_max)
+               pr=np.polyfit(rc ** 2, rg, 2), pb=np.polyfit(rc ** 2, bg, 2),
+               rc=rc, rgv=sm(rg), bgv=sm(bg), gain_max=a.gain_max)
     if a.flat:
         out['pl'] = np.polyfit(rc ** 2, lm / lm[0], 3)     # green relative to the centre
         print('vignetting: edge at %.0f %% of the centre' % (100 * lm[-1] / lm[0]))

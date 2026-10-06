@@ -143,8 +143,13 @@ class CsiCamera(Node):
             cx, cy, rad = float(c['cx']) * k, float(c['cy']) * k, float(c['R']) * k
             yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
             rr = np.clip(np.hypot(xx - cx, yy - cy) / rad, 0.0, 1.05) ** 2
-            gb = 1.0 / np.polyval(c['pb'], rr)
-            gr = 1.0 / np.polyval(c['pr'], rr)
+            if 'rc' in c.files:           # table per ring (newer calibrations)
+                rn = np.sqrt(rr)
+                gb = 1.0 / np.interp(rn, c['rc'], c['bgv'])
+                gr = 1.0 / np.interp(rn, c['rc'], c['rgv'])
+            else:
+                gb = 1.0 / np.polyval(c['pb'], rr)
+                gr = 1.0 / np.polyval(c['pr'], rr)
             lum = 1.0 / np.polyval(c['pl'], rr) if 'pl' in c.files else np.ones_like(rr)
             lum = np.minimum(lum, float(c['gain_max']) if 'gain_max' in c.files else 2.5)
             gmap = np.stack([gb * lum, lum, gr * lum], axis=2)
