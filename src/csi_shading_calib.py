@@ -9,7 +9,9 @@ Run in the container while the camera node (window 3) is running:
 --flat   white paper (one plain sheet, no print) laid right over the lens,
          room light from above, nothing casting a shadow on it. The sheet
          diffuses the light: every pixel then sees the same white -- colour
-         AND brightness falloff (vignetting) are measured exactly.
+         AND brightness falloff (vignetting) are measured exactly. It is much
+         darker than the room: the script turns exposure/gain up until the
+         centre is mid-grey and sets them back afterwards. Only ratios count.
 default  from the current scene: assumes each ring of the image is grey on
          average (white walls, ceiling). Only the colour, no vignetting.
 
@@ -35,6 +37,34 @@ OUT = '/workspace/config/csi_shading.npz'
 def set_param(name, value):
     subprocess.run(['ros2', 'param', 'set', '/video_source', name, value],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+
+
+def get_param(name):
+    out = subprocess.run(['ros2', 'param', 'get', '/video_source', name],
+                         capture_output=True, text=True, timeout=15).stdout
+    return float(out.strip().split()[-1])
+
+
+def expose_for_flat():
+    """Turn exposure (max 60 ms) and gain (max 10) up until the centre of the
+    circle is ~140 of 255. Returns the old values."""
+    old = (get_param('exposure_ms'), get_param('gain'))
+    exp, gain = old
+    for _ in range(6):
+        img = grab(3)
+        h, w = img.shape[:2]
+        c = img[h // 2 - 40:h // 2 + 40, w // 2 - 40:w // 2 + 40].mean()
+        print('  exposure %.0f ms, gain %.1f -> centre %.0f' % (exp, gain, c))
+        if 110 <= c <= 180:
+            break
+        f = min(max(140.0 / max(c, 1.0), 0.3), 6.0)
+        exp_new = min(60.0, exp * f)
+        gain = min(10.0, max(1.0, gain * f * exp / exp_new))
+        exp = exp_new
+        set_param('exposure_ms', '%.1f' % exp)
+        set_param('gain', '%.2f' % gain)
+        time.sleep(3.0)                      # pipeline restart
+    return old
 
 
 def grab(n_frames):
@@ -88,6 +118,7 @@ def main():
 
     set_param('shading', 'false')
     time.sleep(1.0)
+    old = expose_for_flat() if a.flat else None
     img = grab(a.frames)
     h, w = img.shape[:2]
     cx, cy, R = circle(img)
@@ -120,6 +151,10 @@ def main():
     set_param('shading', 'true')            # the camera node reloads the file
     time.sleep(1.5)
     profile(grab(a.frames), cx, cy, R, 'AFTER (corrected):')
+    if old is not None:
+        set_param('exposure_ms', '%.1f' % old[0])
+        set_param('gain', '%.2f' % old[1])
+        print('exposure %.0f ms / gain %.1f restored -- take the paper off.' % old)
 
 
 if __name__ == '__main__':
