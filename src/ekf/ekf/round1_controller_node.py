@@ -397,7 +397,7 @@ class Round1Controller(Node):
         # of ~30 cm then moves it onto the closer line. CW: the line at
         # 0.305 left the car 1.2 cm out of the bay (only_parken_59).
         'park_start_clearance_cw':  ('park_start_clearance_cw',  0.02, float),
-        'park_start_clearance_ccw': ('park_start_clearance_ccw', 0.05, float),
+        'park_start_clearance_ccw': ('park_start_clearance_ccw', 0.02, float),
         # Deceleration for braking to v_finish before the last corner. With
         # finish_decel 0.8 it braked only ~0.5 m before the turn-in point and
         # the ESP undershot to 0.16 m/s right at it -- it felt like braking in
@@ -527,7 +527,7 @@ class Round1Controller(Node):
         # (only_parken_86: 0.108 instead of ~0.128 and 4.5 deg askew -> 2 cm
         # too close). 0 = as before, the measured distance at the start.
         'park_bay_q_cw':            ('park_bay_q_cw',            0.128, float),
-        'park_bay_q_ccw':           ('park_bay_q_ccw',           0.0, float),
+        'park_bay_q_ccw':           ('park_bay_q_ccw',           0.135, float),
         # Park start along the straight from the BAY ITSELF: on the finish
         # straight the LiDAR sees the inner face of the front magenta wall
         # (70-150 points per scan). Park start rear axle = that face + this
@@ -572,7 +572,7 @@ class Round1Controller(Node):
         # against it). Both back to 0. only_parken_3: looked good, but very
         # close to the wall in the first two moves -> start 1.5 cm further back.
         'park_offset_long_ccw':     ('park_offset_long_ccw',     -0.015, float),
-        'park_offset_lat_ccw':      ('park_offset_lat_ccw',      0.0, float),
+        'park_offset_lat_ccw':      ('park_offset_lat_ccw',      -0.04, float),
         'park_offset_long_cw':      ('park_offset_long_cw',      -0.025, float),
         'park_offset_lat_cw':       ('park_offset_lat_cw',       0.01, float),
         # --- /localization_state -------------------------------------------
