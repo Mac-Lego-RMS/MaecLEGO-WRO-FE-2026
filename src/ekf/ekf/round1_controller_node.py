@@ -510,8 +510,10 @@ class Round1Controller(Node):
         # in the bay (measured). From it the park start pose if the inner
         # sequence was driven -- parking always uses the reversed normal
         # sequence.
-        'park_std_long_cw':         ('park_std_long_cw',         0.315, float),
-        'park_std_lat_cw':          ('park_std_lat_cw',          0.227, float),
+        # CW: from only_parken_56 (unpark end 29.8 cm long; lateral so that
+        # the parking line comes out at the minimum 0.305 like there).
+        'park_std_long_cw':         ('park_std_long_cw',         0.298, float),
+        'park_std_lat_cw':          ('park_std_lat_cw',          0.160, float),
         # CCW re-measured 04.10. (only_parken_1-4: 31.3-33.3 long, 14.2-16.8
         # lat) -- they matter now that the outer sequence is the default
         # without a pylon: then the park start pose comes from here.
@@ -1208,12 +1210,30 @@ class Round1Controller(Node):
         std_long = self.park_std_long_ccw if ccw else self.park_std_long_cw
         std_lat = self.park_std_lat_ccw if ccw else self.park_std_lat_cw
 
-        if self.unpark_variant != 'normal':
+        # Own park table (STEPS_PARK_*): it is tuned for a FIXED start pose
+        # relative to the bay, not for wherever the unpark sequence ended.
+        # Taken from the unpark end, every change to the unpark table moved
+        # the park start along: only_parken_58, CW move 6 27 -> 23 cm, park
+        # start 6.5 cm further back and 3.7 cm further out than in run 56.
+        own_table = self._park_table_separate()
+        if self.unpark_variant != 'normal' or own_table:
             # Different sequence driven: it does NOT stand where the reversed
             # normal sequence begins. Start pose and parking line from the
             # start pose in the bay and the measured final pose of the normal
             # sequence. No reference trajectory for the arc correction -- the
             # one driven was a different one.
+            if self.park_origin is not None and self.walls is not None and own_table:
+                ux, uy, uth = self.park_origin
+                nx, ny, dw = self.walls[self._start_wall()]
+                along = ((self.park_start[0] - ux) * math.cos(uth)
+                         + (self.park_start[1] - uy) * math.sin(uth))
+                lat_off = (nx * self.park_start[0] + ny * self.park_start[1]) - (nx * ux + ny * uy)
+                self.get_logger().info(
+                    "Unpark sequence ended %.1f cm long, %.1f cm lat from the start pose -- "
+                    "own park table: park start pose from park_std_long_%s=%.3f, "
+                    "park_std_lat_%s=%.3f instead." % (
+                        along * 100, lat_off * 100, 'ccw' if ccw else 'cw', std_long,
+                        'ccw' if ccw else 'cw', std_lat))
             if self.park_origin is None or self.walls is None:
                 self.get_logger().error(
                     "%s sequence driven, but start pose or walls are missing -- "
@@ -1230,8 +1250,8 @@ class Round1Controller(Node):
                 "%s sequence driven: park start pose from the normal sequence "
                 "(%.1f cm long, %.1f cm lat from the start pose), parking line %.3f m, "
                 "expected when parked %.3f m. Without arc correction."
-                % (self.unpark_variant, std_long * 100, std_lat * 100,
-                   self.park_q, self.park_q_bay))
+                % ('own park table, ' + self.unpark_variant if own_table else self.unpark_variant,
+                   std_long * 100, std_lat * 100, self.park_q, self.park_q_bay))
             return
 
         # Normal sequence driven: print the measured final pose -- with it
@@ -3052,6 +3072,22 @@ class Round1Controller(Node):
         f = max(1.0 - self.park_corr_max, min(1.0 + self.park_corr_max, f))
         actual = trajectory((0.0, 0.0, heading), before + [(steer, cm * f)])[-1][0]
         return setpoint[0] - actual[0]
+
+    def _park_table_separate(self):
+        """True if STEPS_PARK_<dir> is set and is NOT the reversal of the
+        normal unpark sequence (same test as _build_park_sequence)."""
+        if not self.unpark_direction:
+            return False
+        try:
+            flat, _name = park_sequence(self.unpark_direction)
+            seq = mirror_steps(steps_from_flat(flat), self.unpark_direction == 'CCW')
+        except (ValueError, KeyError):
+            return False
+        rev_seq = [(steer, -cm) for steer, cm in
+                   reversed(self.unpark_steps_std or self.unpark_steps_run or [])]
+        return not (len(seq) == len(rev_seq) and all(
+            abs(a[0] - b[0]) < 1e-6 and abs(a[1] - b[1]) < 1e-6
+            for a, b in zip(seq, rev_seq)))
 
     def _build_park_sequence(self):
         """Park sequence (wire values, in driving order): STEPS_PARK_CW or
