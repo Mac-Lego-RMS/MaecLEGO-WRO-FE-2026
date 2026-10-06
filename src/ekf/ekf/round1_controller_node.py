@@ -521,6 +521,22 @@ class Round1Controller(Node):
         # the parking line comes out at the minimum 0.305 like there).
         'park_std_long_cw':         ('park_std_long_cw',         0.298, float),
         'park_std_lat_cw':          ('park_std_lat_cw',          0.160, float),
+        # Own park table: parking line = park_bay_q_* + park_std_lat_* from the
+        # outer wall, FIXED. Before, the distance the robot happened to be set
+        # down from the outer wall in the bay went straight into it
+        # (only_parken_86: 0.108 instead of ~0.128 and 4.5 deg askew -> 2 cm
+        # too close). 0 = as before, the measured distance at the start.
+        'park_bay_q_cw':            ('park_bay_q_cw',            0.128, float),
+        'park_bay_q_ccw':           ('park_bay_q_ccw',           0.0, float),
+        # Park start along the straight from the BAY ITSELF: on the finish
+        # straight the LiDAR sees the inner face of the front magenta wall
+        # (70-150 points per scan). Park start rear axle = that face + this
+        # distance -- independent of how well the front wall was measured at
+        # the start (CW with a pylon: the front came from a kinked piece of
+        # wall, park start 2-4 cm too far back, only_parken_85/87).
+        # park_offset_long_* does NOT apply then. 0 = off.
+        'park_face_dist_cw':        ('park_face_dist_cw',        0.073, float),
+        'park_face_dist_ccw':       ('park_face_dist_ccw',       0.0, float),
         # CCW re-measured 04.10. (only_parken_1-4: 31.3-33.3 long, 14.2-16.8
         # lat) -- they matter now that the outer sequence is the default
         # without a pylon: then the park start pose comes from here.
@@ -558,7 +574,7 @@ class Round1Controller(Node):
         'park_offset_long_ccw':     ('park_offset_long_ccw',     -0.015, float),
         'park_offset_lat_ccw':      ('park_offset_lat_ccw',      0.0, float),
         'park_offset_long_cw':      ('park_offset_long_cw',      -0.025, float),
-        'park_offset_lat_cw':       ('park_offset_lat_cw',       -0.01, float),
+        'park_offset_lat_cw':       ('park_offset_lat_cw',       0.01, float),
         # --- /localization_state -------------------------------------------
         # With 'recovering'/'lost' at most this fast (curvature stays the same).
         'v_loc_uncertain':          ('v_loc_uncertain',          0.20, float),
@@ -862,6 +878,8 @@ class Round1Controller(Node):
         self.loc_wait_t0 = None       # parking waits for 'ok'
         self.bay = None               # /parking_bay: measured bay walls
         self.bay_front_gaps = []      # start: base_link -> front magenta wall [m]
+        self.bay_face_samples = []    # finish straight: inner face of the front bay wall, along [m]
+        self.bay_face_applied = False
         self.unpark_link_t0 = None    # since when all ESP connections are matched
         self.unpark_trajectory = []   # poses at all move boundaries of the unparking
         self.park_loc_uncertain = False  # keeps parking without corrections
@@ -1251,10 +1269,24 @@ class Round1Controller(Node):
                 return
             ux, uy, uth = self.park_origin
             nx, ny, dw = self.walls[self._start_wall()]
-            self.park_start = (ux + std_long * math.cos(uth) + std_lat * nx,
-                               uy + std_long * math.sin(uth) + std_lat * ny, uth)
-            self.park_q_bay = (nx * ux + ny * uy) - dw
+            # along the WALL, not along the robot's heading in the bay: set
+            # down 4.5 deg askew, 0.30 m along the heading moved the start
+            # pose 2.3 cm sideways (only_parken_86)
+            tx, ty = -ny, nx
+            if tx * math.cos(uth) + ty * math.sin(uth) < 0.0:
+                tx, ty = -tx, -ty
+            q_meas = (nx * ux + ny * uy) - dw
+            q_nom = self.park_bay_q_ccw if ccw else self.park_bay_q_cw
+            self.park_q_bay = q_nom if q_nom > 0.0 else q_meas
             self.park_q = self.park_q_bay + std_lat
+            dq = self.park_q - q_meas
+            self.park_start = (ux + std_long * tx + dq * nx,
+                               uy + std_long * ty + dq * ny, math.atan2(ty, tx))
+            if q_nom > 0.0:
+                self.get_logger().info(
+                    "Parking line from the outer wall: %.3f + %.3f = %.3f m (set down "
+                    "%.3f m from the outer wall in the bay -- does not count)."
+                    % (q_nom, std_lat, self.park_q, q_meas))
             self.unpark_trajectory = []
             self.get_logger().info(
                 "%s sequence driven: park start pose from the normal sequence "
@@ -1378,6 +1410,71 @@ class Round1Controller(Node):
 
     def _park_active(self):
         return self.park and self.park_start is not None
+
+    def _bay_face_frame(self):
+        """Bay origin, direction along the start straight, outer wall HNF."""
+        ux, uy, uth = self.park_origin
+        nx, ny, dw = self.walls[self._start_wall()]
+        tx, ty = -ny, nx
+        if tx * math.cos(uth) + ty * math.sin(uth) < 0.0:
+            tx, ty = -tx, -ty
+        return ux, uy, tx, ty, nx, ny, dw
+
+    def _bay_face_sample(self, msg):
+        """Finish straight, approaching the bay: where along the straight is
+        the inner face of the front magenta wall? (see park_face_dist_*)"""
+        K = self.park_face_dist_cw if self.unpark_direction == 'CW' else self.park_face_dist_ccw
+        if (K <= 0.0 or self.bay_face_applied or self.park_origin is None
+                or self.park_start is None or self.walls is None or self.pose is None
+                or not self._park_active() or not self._on_finish_straight()):
+            return
+        ux, uy, tx, ty, nx, ny, dw = self._bay_face_frame()
+        gap = float(np.median(self.bay_front_gaps)) if self.bay_front_gaps else 0.24
+        a_exp = gap - 0.06              # the short-range gap at the start reads ~3-8 cm long
+        x, y, th = self.pose
+        a_r = (x - ux) * tx + (y - uy) * ty
+        if not (a_exp - 0.90 <= a_r <= a_exp - 0.15):
+            return
+        pts = scan_to_points(msg)
+        bx, by = pts[:, 0] + LIDAR_X, pts[:, 1]
+        c, sn = math.cos(th), math.sin(th)
+        mx, my = x + c * bx - sn * by, y + sn * bx + c * by
+        a = (mx - ux) * tx + (my - uy) * ty
+        q = nx * mx + ny * my - dw
+        sel = (a > gap - 0.17) & (a < gap + 0.06) & (q > 0.03) & (q < 0.18)
+        if sel.sum() >= 5:
+            self.bay_face_samples.append(float(np.median(a[sel])))
+
+    def _apply_bay_face(self):
+        """Once, when the forward approach stops: park start along the
+        straight = measured magenta face + park_face_dist_*."""
+        if self.bay_face_applied or self.park_origin is None or self.park_start is None:
+            return
+        self.bay_face_applied = True
+        K = self.park_face_dist_cw if self.unpark_direction == 'CW' else self.park_face_dist_ccw
+        if K <= 0.0:
+            return
+        n = len(self.bay_face_samples)
+        if n < 5:
+            self.get_logger().warn(
+                "Parking: front magenta wall seen in only %d scans on the finish "
+                "straight -- park start pose stays from the map." % n)
+            return
+        face = float(np.median(self.bay_face_samples))
+        ux, uy, tx, ty, _nx, _ny, _dw = self._bay_face_frame()
+        cur = (self.park_start[0] - ux) * tx + (self.park_start[1] - uy) * ty
+        d = face + K - cur
+        if abs(d) > 0.08:
+            self.get_logger().warn(
+                "Parking: front magenta wall at %.3f m along (%d scans) would shift the "
+                "park start pose by %+.1f cm -- implausible, stays from the map."
+                % (face, n, d * 100))
+            return
+        self._park_shift(d, 0.0)
+        self.get_logger().info(
+            "Parking: front magenta wall seen at %.3f m along (%d scans) -> park start "
+            "pose at %.3f m: shifted %+.1f cm along (park_face_dist %.3f; "
+            "park_offset_long does not apply)." % (face, n, face + K, d * 100, K))
 
     def _park_offset_for_wall(self, wall_idx):
         """Parking line: distance of the recorded park start pose to the outer
@@ -3339,6 +3436,7 @@ class Round1Controller(Node):
         rest = front_d - target_f - lead - early
         if rest <= self.park_long_tol:
             self.publish_stop()
+            self._apply_bay_face()
             if self.park_overshoot > 0.0 and self.park_drive_target_f is None:
                 self.get_logger().info(
                     "Parking: drove %.1f cm past the start pose -- remeasures "
@@ -4006,6 +4104,10 @@ class Round1Controller(Node):
         """Something right in front of the nose (within the car width)? Then
         stop and manoeuvre. Only forward in DRIVE/TURN -- unparking and
         parking deliberately drive close to the walls."""
+        try:
+            self._bay_face_sample(msg)
+        except Exception as err:          # never let it break the bump guard
+            self.get_logger().warn("bay face sample: %s" % err, throttle_duration_sec=10.0)
         if (not self.manoeuvre or self.manoeuvre_trigger_dist <= 0.0
                 or self.state not in ('DRIVE', 'TURN') or self.last_cmd[0] < 0.05):
             return
