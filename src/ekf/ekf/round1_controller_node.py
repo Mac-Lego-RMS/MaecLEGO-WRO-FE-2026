@@ -391,6 +391,13 @@ class Round1Controller(Node):
         # 0.03 was 1 cm in practice (only_parken_2): the crawl approach holds
         # the line only to ~1.5-2 cm (steering play at 0.15 m/s).
         'park_wall_clearance': ('park_wall_clearance', 0.05, float),
+        # The park START pose (and the reverse onto it) may lie closer: the
+        # car stands past the bay there, beside nothing. Forward past the bay
+        # it still drives at park_wall_clearance (park_pass_q), the reverse
+        # of ~30 cm then moves it onto the closer line. CW: the line at
+        # 0.305 left the car 1.2 cm out of the bay (only_parken_59).
+        'park_start_clearance_cw':  ('park_start_clearance_cw',  0.02, float),
+        'park_start_clearance_ccw': ('park_start_clearance_ccw', 0.05, float),
         # Deceleration for braking to v_finish before the last corner. With
         # finish_decel 0.8 it braked only ~0.5 m before the turn-in point and
         # the ESP undershot to 0.16 m/s right at it -- it felt like braking in
@@ -551,7 +558,7 @@ class Round1Controller(Node):
         'park_offset_long_ccw':     ('park_offset_long_ccw',     -0.015, float),
         'park_offset_lat_ccw':      ('park_offset_lat_ccw',      0.0, float),
         'park_offset_long_cw':      ('park_offset_long_cw',      -0.015, float),
-        'park_offset_lat_cw':       ('park_offset_lat_cw',       0.0, float),
+        'park_offset_lat_cw':       ('park_offset_lat_cw',       -0.025, float),
         # --- /localization_state -------------------------------------------
         # With 'recovering'/'lost' at most this fast (curvature stays the same).
         'v_loc_uncertain':          ('v_loc_uncertain',          0.20, float),
@@ -834,6 +841,7 @@ class Round1Controller(Node):
         # bay position ~14 cm / 3.4 deg off (CCW park test), and the EKF only
         # evens that out during the lap.
         self.park_q = None
+        self.park_pass_q = None       # line forward past the bay (>= park_q)
         self.park_q_bay = None        # expected distance when parked
         self.park_q_samples = []
         # First corner after unparking: if it already stands close to it, the
@@ -1329,7 +1337,10 @@ class Round1Controller(Node):
         # width plus park_wall_clearance and it scrapes their tips
         # (only_parken_1: line 0.254 m = 1 mm on paper, driven 0.22-0.24 m =
         # 2-4 cm into the walls). Never closer than that.
-        q_min = BAY_DEPTH + 0.5 * CAR_WIDTH + self.park_wall_clearance
+        clear = (self.park_start_clearance_cw if self.unpark_direction == 'CW'
+                 else self.park_start_clearance_ccw)
+        q_min = BAY_DEPTH + 0.5 * CAR_WIDTH + clear
+        q_pass = BAY_DEPTH + 0.5 * CAR_WIDTH + self.park_wall_clearance
         if self.park_q is not None and self.park_q < q_min:
             d = q_min - self.park_q
             self._park_shift(0.0, d)
@@ -1338,8 +1349,14 @@ class Round1Controller(Node):
                 "magenta walls (%.2f + half car width %.3f + clearance %.2f). The "
                 "car parks that much further out -- if it is then not deep enough "
                 "in the bay, correct the park moves, not the line."
-                % (d * 100, self.park_q, BAY_DEPTH, 0.5 * CAR_WIDTH,
-                   self.park_wall_clearance))
+                % (d * 100, self.park_q, BAY_DEPTH, 0.5 * CAR_WIDTH, clear))
+        if self.park_q is not None:
+            self.park_pass_q = max(self.park_q, q_pass)
+            if self.park_pass_q > self.park_q + 1e-3:
+                self.get_logger().info(
+                    "Forward past the bay at %.3f m (clearance %.2f to the magenta "
+                    "walls), the reverse moves it onto the parking line %.3f m."
+                    % (self.park_pass_q, self.park_wall_clearance, self.park_q))
 
     def _park_shift(self, dl, dq):
         """Move the park start pose dl along and dq away from the outer wall."""
@@ -1371,7 +1388,9 @@ class Round1Controller(Node):
         """
         if not self._park_active() or self.park_q is None:
             return None
-        q = self.park_q
+        # forward on the finish straight: past the bay, not closer than
+        # park_wall_clearance (the reverse then goes onto park_q)
+        q = self.park_pass_q if self.park_pass_q is not None else self.park_q
         lane_w = (self.lane_width[wall_idx]
                   if self.lane_width is not None and wall_idx < len(self.lane_width)
                   else 1.0)
