@@ -4032,23 +4032,31 @@ class Round1Controller(Node):
         return cap
 
     def publish_cmd(self, v, omega):
-        # Drive slower, but with the SAME curvature: omega = v * kappa --
-        # capping only v would mean steering tighter than planned.
+        # A speed cap lowers ONLY v. omega must not be scaled with it: every
+        # controller computes omega with the MEASURED speed (turn: v_act*kappa,
+        # Stanley: v_act*tan(delta)/L) and the bridge divides by the measured
+        # speed again (delta = atan(L*omega/v_act)) -- omega already stands
+        # for a steering angle. It used to be scaled by cap/v, which cut the
+        # steering in proportion: last corner before parking v_turn 0.55 ->
+        # v_finish 0.30 = 55 % of the planned curvature, the car drifted 10 cm
+        # outward and hit the rear magenta wall (only_parken_55); on the finish
+        # straight (v_drive 0.75 -> 0.30) Stanley steered with 40 %.
         cap = self._v_cap()
         if cap is not None and abs(v) > cap:
-            k = cap / abs(v)
-            v, omega = v * k, omega * k
+            v = math.copysign(cap, v)
         # Clamp by the STEERING ANGLE, not just the yaw rate: omega = v*tan(d)/L,
         # so a fixed yaw-rate limit allows physically impossible steering at low
         # speed (3 rad/s at 0.35 m/s would need 42 deg, mechanical limit is 25).
-        v_eff = max(abs(v), 0.05)
+        # With the speed the bridge divides by (measured, >= 0.05) -- with the
+        # commanded one the limit was too tight while braking.
+        v_eff = max(abs(self.v_act), 0.05)
         omega_steer_max = v_eff * math.tan(self.max_steer) / self.wheelbase
         limit = min(self.max_yaw_rate, omega_steer_max)
         if abs(omega) > limit:
             self.get_logger().warn(
                 f"omega {omega:+.2f} limited to {math.copysign(limit, omega):+.2f} "
                 f"(steer angle limit {math.degrees(self.max_steer):.0f} deg at v={v_eff:.2f}).",
-                throttle_duration_sec=1.0)
+                throttle_duration_sec=5.0)
         omega = max(-limit, min(limit, omega))
         cmd = Twist()
         cmd.linear.x = float(v)
