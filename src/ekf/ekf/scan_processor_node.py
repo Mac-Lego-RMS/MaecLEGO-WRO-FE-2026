@@ -1597,10 +1597,18 @@ class ScanProcessor(Node):
             m = m + PYLON_HALF * ray / (np.hypot(*ray) or 1.0)     # seen face -> centre
             if abs((d_inner - lateral(*m)) - SEAT_INNER_INSET) > 0.08:
                 continue                     # not on an inner-column seat
+            # lo/hi are hard limits from the inner wall (its visible ends are
+            # real ends or shadows -- the front cannot lie outside). A pylon a
+            # few cm off its seat lands just outside: only_parken_88 1.98 m
+            # against hi 1.95 -- 3 cm tolerance rejected almost every scan,
+            # 11 votes took 40 s and the controller gave up. Rows are 0.5 m
+            # apart, 8 cm cannot pick the wrong one; the result is clamped
+            # into [lo, hi]. (The park start no longer depends on the front:
+            # it is set from the magenta wall on the finish straight.)
             for row in (1.0, 1.5, 2.0):
                 f = along(*m) + row + PYLON_SEAT_CORR
-                if lo - 0.03 <= f <= hi + 0.03 and f >= FRONT_MIN_DIST:
-                    fronts.append(f)
+                if lo - 0.08 <= f <= hi + 0.08 and f >= FRONT_MIN_DIST:
+                    fronts.append(min(max(f, lo), hi))
         if not fronts or max(fronts) - min(fronts) > 0.03:
             if fronts:
                 self.get_logger().warn(
