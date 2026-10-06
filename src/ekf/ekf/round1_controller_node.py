@@ -535,7 +535,7 @@ class Round1Controller(Node):
         # the start (CW with a pylon: the front came from a kinked piece of
         # wall, park start 2-4 cm too far back, only_parken_85/87).
         # park_offset_long_* does NOT apply then. 0 = off.
-        'park_face_dist_cw':        ('park_face_dist_cw',        0.073, float),
+        'park_face_dist_cw':        ('park_face_dist_cw',        0.090, float),
         'park_face_dist_ccw':       ('park_face_dist_ccw',       0.0, float),
         # CCW re-measured 04.10. (only_parken_1-4: 31.3-33.3 long, 14.2-16.8
         # lat) -- they matter now that the outer sequence is the default
@@ -1426,9 +1426,16 @@ class Round1Controller(Node):
         K = self.park_face_dist_cw if self.unpark_direction == 'CW' else self.park_face_dist_ccw
         if (K <= 0.0 or self.bay_face_applied or self.park_origin is None
                 or self.park_start is None or self.walls is None or self.pose is None
-                or not self._park_active() or not self._on_finish_straight()):
+                or not self._park_active()):
+            return
+        # also the end of the last corner: the finish straight only begins
+        # ~0.3 m before the bay, then just 7 scans were left (only_parken_89)
+        last_turn = (self.state == 'TURN' and self.corner_count + 1 >= self.n_corners)
+        if not (self._on_finish_straight() or last_turn):
             return
         ux, uy, tx, ty, nx, ny, dw = self._bay_face_frame()
+        if abs(wrap(self.pose[2] - math.atan2(ty, tx))) > math.radians(25.0):
+            return
         gap = float(np.median(self.bay_front_gaps)) if self.bay_front_gaps else 0.24
         a_exp = gap - 0.06              # the short-range gap at the start reads ~3-8 cm long
         x, y, th = self.pose
