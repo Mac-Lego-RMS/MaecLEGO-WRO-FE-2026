@@ -3824,12 +3824,20 @@ class Round1Controller(Node):
         self._unpark_handover()
 
     def _first_corner_dist(self, x, y, theta):
-        """Distance along the heading to the corner point of the first corner."""
+        """Distance to the corner point of the first corner, along the
+        straight (with the direction known) -- not along the heading: the
+        middle unpark sequence ends 60 deg askew, along the heading corner 1
+        came out 0.41 m ahead instead of 1.73 m, and it scanned right there
+        instead of at the end of the start straight (sim_5)."""
         idx = self.pick_first_corner(x, y, theta)
         if idx is None:
             return None
         c = self.corners[idx]
-        return (c[0] - x) * math.cos(theta) + (c[1] - y) * math.sin(theta)
+        if self.race_direction in ('CW', 'CCW'):
+            tx, ty = self._travel_dir(idx)
+        else:
+            tx, ty = math.cos(theta), math.sin(theta)
+        return (c[0] - x) * tx + (c[1] - y) * ty
 
     def _unpark_adopt_direction(self):
         """Who has the last word on the direction of travel?
