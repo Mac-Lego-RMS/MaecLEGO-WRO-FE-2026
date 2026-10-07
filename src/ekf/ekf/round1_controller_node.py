@@ -98,7 +98,7 @@ PACE_PROFILES = {
     'medium': dict(v_drive=0.55, v_turn=0.45, v_obstacle=0.45,
                    v_obstacle_steep=0.40, v_steep_path=0.30),
     'fast':   dict(v_drive=0.75, v_turn=0.55, v_obstacle=0.55,
-                   v_obstacle_steep=0.55, v_steep_path=0.35),
+                   v_obstacle_steep=0.55, v_steep_path=0.45),   # cam_1: S-curve faster
     # Open challenge (start_robot.sh --open, OPEN_PACE): no pylons, so only
     # v_drive and v_turn act; the three obstacle speeds are only set so the
     # profile is complete. open_medium = what open_test_3 drove cleanly
@@ -418,6 +418,15 @@ class Round1Controller(Node):
         # control tick is 4 cm past T_A, and it needs ~0.5 m to stop
         # (sim_3/sim_4 corner 3). 0 = off.
         'v_tight_turn':  ('v_tight_turn',  0.40,  float),
+        # Corner speed by radius: v_tight_turn at min_turn_radius, rising
+        # linearly to v_turn at v_turn_full_r (cam_1: speed by how tight the
+        # corner is).
+        'v_turn_full_r': ('v_turn_full_r', 0.50,  float),
+        # Corner with a pylon that is passed tight (planned clearance below
+        # tight_pylon_clr, e.g. CCW: inside before, red outside / green inside
+        # right after the corner): at most this fast. 0 = off.
+        'v_tight_pylon': ('v_tight_pylon', 0.30,  float),
+        'tight_pylon_clr': ('tight_pylon_clr', 0.20, float),
         'accel_dist':    ('accel_dist',    0.2,   float),   # ramp v_turn->v_drive after a corner
         # Accelerate already in the END of the corner: from this much remaining
         # heading (deg, after the dead time) v rises from v_turn towards
@@ -683,7 +692,9 @@ class Round1Controller(Node):
         # mandatory hold). With 0.30 m/s only ~0.5 m remained after the corner
         # to settle: the heading swung to +10..+15 deg and it arrived askew.
         'v_park_approach':          ('v_park_approach',          0.15, float),
-        'steep_path_from':          ('steep_path_from',          0.60, float),   # lat per long
+        # cam_1: the S-curve between two pylons (0.67-0.78) crawled at 0.35 --
+        # only really steep (late) dodges are capped now
+        'steep_path_from':          ('steep_path_from',          0.85, float),   # lat per long
         'v_steep_path':             ('v_steep_path',             0.35, float),
         # Pace profile (PACE_PROFILES), 'custom' = individual values. pace_lap1:
         # own profile for the scan lap, 'same' = like pace.
@@ -4920,6 +4931,22 @@ class Round1Controller(Node):
             return None
         return top[1]
 
+    def _ramp_cap_radius_ramping(self, x, y):
+        """Is the car still before the end of the last lane change of the
+        obstacle path?"""
+        if not self.obs_path or self.arc is None:
+            return False
+        LA = self.arc['LA']
+        tr = self.arc['travel']
+        q = [LA[0] * px + LA[1] * py - LA[2] for (px, py) in self.obs_path]
+        k = len(q) - 1
+        while k > 0 and abs(q[k - 1] - q[-1]) <= 0.01:
+            k -= 1
+        if k == 0:
+            return False
+        ex, ey = self.obs_path[k]
+        return (ex - x) * tr[0] + (ey - y) * tr[1] > 0.0
+
     def _ramp_cap_radius(self, o_out=None):
         """Largest radius whose T_A lies arc_after_ramp after the last lane
         change of the current obstacle path -- None if no cap is needed."""
@@ -5442,11 +5469,26 @@ class Round1Controller(Node):
         return min(v_acc, v_brk)
 
     def _v_turn_eff(self):
-        """v_turn, or v_tight_turn for an arc with (nearly) the smallest radius."""
-        if (self.v_tight_turn > 0.0 and self.arc is not None
-                and self.arc.get('R', 1.0) <= self.min_turn_radius + 0.03):
-            return min(self.v_turn, self.v_tight_turn)
-        return self.v_turn
+        """Corner speed: by radius (v_tight_turn at the smallest, v_turn from
+        v_turn_full_r on), and v_tight_pylon if a pylon at the corner is passed
+        tight."""
+        v = self.v_turn
+        a = self.arc
+        if a is None:
+            return v
+        if self.v_tight_turn > 0.0:
+            r0, r1 = self.min_turn_radius, max(self.v_turn_full_r, self.min_turn_radius + 0.01)
+            f = min(max((a.get('R', 1.0) - r0) / (r1 - r0), 0.0), 1.0)
+            v = min(v, self.v_tight_turn + f * (self.v_turn - self.v_tight_turn))
+        if self.v_tight_pylon > 0.0:
+            if a.get('_clr_key') != (a.get('R'), a.get('T_A')):
+                clr, _w = self._arc_pylon_clearance(a)
+                a['_clr'] = clr
+                a['_clr_key'] = (a.get('R'), a.get('T_A'))
+            clr = a.get('_clr')
+            if clr is not None and clr < self.tight_pylon_clr:
+                v = min(v, self.v_tight_pylon)
+        return v
 
     def _drive(self, x, y, theta):
         """Lane-following on the current straight (Stanley holds the centre line).
@@ -5727,9 +5769,16 @@ class Round1Controller(Node):
             v = min(v, math.sqrt(self.v_finish ** 2 + 2.0 * self.park_turn_decel * rest))
         # Settle before the corner: if it runs unsteadily towards T_A, slow down.
         # That gives Stanley more time per metre without shifting the geometry.
+        lat_s, om_s = lateral, abs(self.last_cmd[1])
+        if self.obs_path:
+            # cam_1: the S-curve before the corner crawled at v_settle -- the
+            # lateral to the entry line was the planned lane change itself
+            lat_s = min(math.hypot(x - qx, y - qy) for (qx, qy) in self.obs_path)
+            if self._ramp_cap_radius_ramping(x, y):
+                om_s = 0.0
         if (to_TA < self.turn_in_settle_window
-                and (lateral > self.turn_in_lat_gate
-                     or abs(self.last_cmd[1]) > self.turn_in_om_gate)):
+                and (lat_s > self.turn_in_lat_gate
+                     or om_s > self.turn_in_om_gate)):
             v = min(v, self.v_settle)
             self.get_logger().info(
                 f"Settling before the corner: to_TA={to_TA:.2f} lat={lateral:.3f} "
