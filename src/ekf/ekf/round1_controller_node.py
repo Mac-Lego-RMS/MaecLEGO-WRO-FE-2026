@@ -527,10 +527,12 @@ class Round1Controller(Node):
         # to 0.75 m the perception checks from the bay. Whatever stands beside
         # or behind it does not count.
         'unpark_decide_from':       ('unpark_decide_from',       0.10, float),
-        # No pylon ahead of the bay: unpark with the OUTER sequence (close to
-        # the outer wall) instead of the middle/normal one -- more room to
-        # react to the pylons of the start straight. 0 = middle as before.
-        'unpark_default_outer':     ('unpark_default_outer',     1.0, lambda v: bool(float(v))),
+        # No pylon right ahead of the bay (the next one only at the end of the
+        # start straight): MIDDLE sequence -- from the lane centre it can still
+        # pass that pylon inside or outside. 1 = OUTER sequence instead (sim_3:
+        # red at the end 1.01 m ahead, from outside it had to cross 49 cm in
+        # 67 cm and stood at the red pylon in the scan hold).
+        'unpark_default_outer':     ('unpark_default_outer',     0.0, lambda v: bool(float(v))),
         'unpark_decide_to':         ('unpark_decide_to',         0.75, float),
         # Final pose of the NORMAL unpark sequence relative to the start pose
         # in the bay (measured). From it the park start pose if the inner
