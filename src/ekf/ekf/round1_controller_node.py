@@ -198,8 +198,9 @@ class Round1Controller(Node):
         # already failed the check (sim_3 corner 3: two emergency manoeuvres).
         # sim_4: 3 cm late at T_A (one control tick at 0.8 m/s) -> 0.16 m
         # exit, rejected against 0.16 -> manoeuvre, rolled 51 cm into the wall.
-        'turn_anchor_out_tol': ('turn_anchor_out_tol', 0.05, float),
-        'turn_anchor_out_floor': ('turn_anchor_out_floor', 0.14, float),
+        'turn_anchor_out_tol': ('turn_anchor_out_tol', 0.07, float),   # cam_16: 0.05 still rejected 0.14
+        # cam_16: 4 cm late -> exit 0.14, rejected against exactly 0.14 -> 0.12
+        'turn_anchor_out_floor': ('turn_anchor_out_floor', 0.12, float),
         # Clearance car edge -> corner of the INNER band over the arc. On the
         # inner line (o_in = o_out = 0.81) the 0.50 m arc passed the inner
         # corner with 0.7 cm in theory, 2 cm measured (sim_3 corners 6/10):
@@ -461,6 +462,7 @@ class Round1Controller(Node):
         'turn_exit_accel_deg': ('turn_exit_accel_deg', 0.0, float),
         'turn_lat_accel_max':  ('turn_lat_accel_max',  1.6, float),   # m/s^2
         'brake_dist':    ('brake_dist',    0.2,   float),   # ramp v_drive->v_turn before T_A
+        'turn_brake_decel': ('turn_brake_decel', 0.45, float),   # kinematic ramp to the corner speed (0 = off)
         # lap / finish
         'n_corners':     ('n_corners',     4,     int),
         'finish_front_dist': ('finish_front_dist', 1.5, float),
@@ -3832,6 +3834,15 @@ class Round1Controller(Node):
         arcs = [k for k, (st, cm) in enumerate(seq) if abs(st) >= 50.0 and abs(cm) >= 1.0][:3]
         if len(arcs) < 2:
             return seq, False
+        # Deeper (lat > 0) lengthens the arcs. A FORWARD arc in the bay drives
+        # towards the front magenta wall: cam_15/16 it was lengthened 4.5 ->
+        # 6.9 / 6.0 cm (the -1.5 hand correction undone) and hit the wall.
+        # Then only the reverse arcs (depth + heading); the end moves a bit
+        # further back in the bay instead.
+        if lat > 0.0:
+            rev = [k for k in arcs if seq[k][1] < 0.0]
+            if len(rev) >= 2:
+                arcs = rev[:2]
 
         def end(sq):
             tr = trajectory((0.0, 0.0, 0.0), mirror_steps(sq, True))
@@ -3865,11 +3876,12 @@ class Round1Controller(Node):
         for k, dk in zip(arcs, d):
             out = bent(out, k, float(dk))
         self.get_logger().info(
-            "Parking: start pose %.1f cm %s -> %s (same depth, heading and position "
-            "along the bay)."
+            "Parking: start pose %.1f cm %s -> %s (same depth and heading%s)."
             % (abs(lat) * 100, 'too far inside' if lat > 0 else 'too close to the wall',
                ', '.join("move %d %.1f instead of %.1f cm" % (k + 1, abs(out[k][1]), abs(seq[k][1]))
-                         for k in arcs)))
+                         for k in arcs),
+               ', same position along the bay' if len(arcs) >= 3
+               else '; reverse arcs only, ends a bit further back in the bay'))
         return out, True
 
     def _park_reference_from_sequence(self, seq):
@@ -5554,6 +5566,12 @@ class Round1Controller(Node):
             rb = 1.0
         v_end = self._v_turn_eff()
         v_brk = v_end + rb * (self.v_drive - v_end)
+        # It brakes with only ~0.6 m/s^2: the 0.2 m ramp from 0.75 to 0.45
+        # needs 0.9 m/s^2 -- it came 4 cm late to T_A, the anchored arc was
+        # rejected and it rolled 48 cm into the wall (cam_15/16 corner 1).
+        if self.turn_brake_decel > 0.0:
+            rest = max(dist_to_TA - max(self.v_act, 0.0) * self.steer_dead_time, 0.0)
+            v_brk = min(v_brk, math.sqrt(v_end ** 2 + 2.0 * self.turn_brake_decel * rest))
         return min(v_acc, v_brk)
 
     def _v_turn_eff(self):
