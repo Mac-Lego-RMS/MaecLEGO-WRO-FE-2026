@@ -204,7 +204,15 @@ class Round1Controller(Node):
         # inner line (o_in = o_out = 0.81) the 0.50 m arc passed the inner
         # corner with 0.7 cm in theory, 2 cm measured (sim_3 corners 6/10):
         # smaller radius until this is kept. 0 = off.
-        'inner_corner_clearance': ('inner_corner_clearance', 0.04, float),
+        # sim_18: planned 4.7 cm, driven 1.5-1.8 cm (the arc runs up to 8 cm
+        # inside the circle, as at the pylons) -> 0.08.
+        'inner_corner_clearance': ('inner_corner_clearance', 0.08, float),
+        # T_A at least this far AFTER the last lane change of the obstacle path
+        # (the car must be straight again before turning in). sim_18 corners
+        # 6/10: change 0.19 -> 0.71 ended at T_A, it came in 34 deg turned and
+        # pointed at the inner band corner (1.5 cm). Smaller radius moves T_A
+        # towards the corner. 0 = off.
+        'arc_after_ramp':     ('arc_after_ramp',     0.15, float),
         # Entry line chosen for the CORNER: if no radius keeps
         # arc_pylon_clearance to a pylon at the corner (sim_3-5 corner 3: from
         # the inner line 0.86 past the green at the exit, outer side: 1-4 cm),
@@ -2303,6 +2311,8 @@ class Round1Controller(Node):
                 f"Arc matched to the path end: o_in {arc_o_in:.2f} -> "
                 f"{self.obs_path_end_q:.2f} (obstacle at the end of the straight).")
             self.plan_arc(self.pose[2], o_in_override=self.obs_path_end_q)
+        elif self._ramp_cap_radius() is not None:
+            self.plan_arc(self.pose[2], o_in_override=arc_o_in)
 
     def _return_path(self):
         """After the corner without an obstacle path: a gentle path from the
@@ -4628,6 +4638,13 @@ class Round1Controller(Node):
 
         R = self._radius_for_pylons(idx, A, B, o_in, o_out, R, theta)
         R = self._radius_for_inner_corner(idx, A, B, o_in, o_out, R, theta)
+        r_cap = self._ramp_cap_radius(o_out)
+        if r_cap is not None and r_cap < R - 1e-3:
+            self.get_logger().warn(
+                f"Corner {self.corner_count + 1}: the obstacle path changes lane until "
+                f"shortly before the turn-in -- radius {R:.2f} -> {r_cap:.2f} m so it is "
+                f"straight again {self.arc_after_ramp:.2f} m before T_A.")
+            R = r_cap
 
         LA = (A[0], A[1], A[2] + o_in)
         LB = (B[0], B[1], B[2] + o_out)
@@ -4709,6 +4726,41 @@ class Round1Controller(Node):
             d = 0.05 * k
             poses.append((TB[0] + d * math.cos(th_exit), TB[1] + d * math.sin(th_exit), th_exit))
         return poses, C
+
+    def _arc_inner_clearance(self, a, x=None, y=None, th=None):
+        """Smallest distance car edge -> corner of the inner band along arc a
+        (from the pose x/y/th if given: straight to T_A first). None without
+        the geometry."""
+        if a is None or self.lane_width is None:
+            return None
+        try:
+            LA, LB = a['LA'], a['LB']
+            w_in = self.lane_width[self._entry_wall_idx(self.corner_idx)]
+            w_out = self.lane_width[self._exit_wall_idx(self.corner_idx)]
+            K = line_intersect((LA[0], LA[1], LA[2] - a['o_in'] + w_in),
+                               (LB[0], LB[1], LB[2] - a['o_out'] + w_out))
+        except Exception:
+            return None
+        if K is None:
+            return None
+        C, R, sg = a['C'], a['R'], a['s']
+        TA, TB = a['T_A'], a['T_B']
+        a0 = math.atan2(TA[1] - C[1], TA[0] - C[0])
+        dphi = wrap(math.atan2(TB[1] - C[1], TB[0] - C[0]) - a0)
+        if sg * dphi < 0.0:
+            dphi += sg * 2.0 * math.pi
+        poses = []
+        if x is not None:
+            d = math.hypot(TA[0] - x, TA[1] - y)
+            for k in range(5):
+                f = k / 4.0
+                poses.append((x + f * (TA[0] - x), y + f * (TA[1] - y), th))
+        n = max(4, int(abs(dphi) / math.radians(4.0)))
+        for k in range(n + 1):
+            phi = a0 + dphi * k / n
+            poses.append((C[0] + R * math.cos(phi), C[1] + R * math.sin(phi),
+                          phi + sg * math.pi / 2.0))
+        return min(self._outline_dist(p, K[0], K[1]) for p in poses)
 
     def _arc_pylon_clearance(self, a):
         """Smallest distance car edge -> pylon edge for a finished arc
@@ -4862,6 +4914,35 @@ class Round1Controller(Node):
         if top[1] is None or top[0] < c0 + 0.02:
             return None
         return top[1]
+
+    def _ramp_cap_radius(self, o_out=None):
+        """Largest radius whose T_A lies arc_after_ramp after the last lane
+        change of the current obstacle path -- None if no cap is needed."""
+        if (self.arc_after_ramp <= 0.0 or not self.obs_path or self.arc is None
+                or self.corners is None):
+            return None
+        tr = self.arc['travel']
+        corner = self.corners[self.corner_idx]
+        LA = self.arc['LA']
+        if o_out is None:
+            o_out = self.arc.get('o_out')
+        if o_out is None:
+            return None
+        pts = self.obs_path
+        q = [LA[0] * px + LA[1] * py - LA[2] for (px, py) in pts]   # 0 = on the entry line
+        q_end = q[-1]
+        k = len(q) - 1
+        while k > 0 and abs(q[k - 1] - q_end) <= 0.01:
+            k -= 1
+        if k == 0:
+            return None                              # no lane change at all
+        px, py = pts[k]
+        fd_ramp = (corner[0] - px) * tr[0] + (corner[1] - py) * tr[1]
+        r_cap = fd_ramp - self.arc_after_ramp - o_out
+        if r_cap >= self.arc['R'] - 1e-3 and r_cap >= getattr(self, '_last_r_planned', 0.0):
+            return None
+        r_cap = max(self.min_turn_radius, r_cap)
+        return r_cap if r_cap < self.arc['R'] - 1e-3 else None
 
     def _inner_corner_point(self, idx, A, B):
         """Corner of the inner band at corner idx: entry and exit line at the
@@ -5576,6 +5657,24 @@ class Round1Controller(Node):
                     saved_arc = dict(self.arc)
                     ok, text = self._anchor_arc_at_pose(
                         vx_, vy_, vth_, r_max=1.5 * r0)
+                    # Already turned INTO the corner (the obstacle path swung
+                    # towards the inside right before T_A): the standard arc
+                    # from there cuts the inner band corner (sim_18 corners
+                    # 6/10: heading 34 deg in, standard arc, 1.5 cm). The wider
+                    # anchored arc is the natural continuation -- take it if it
+                    # keeps more room to the inner corner.
+                    into = self.dir_step() * wrap(vth_ - math.atan2(tr[1], tr[0])) > 0.0
+                    if not ok and into and 'anchored radius' in text:
+                        self.arc = dict(saved_arc)
+                        ok2, text2 = self._anchor_arc_at_pose(vx_, vy_, vth_, r_max=2.5 * r0)
+                        if ok2:
+                            c_new = self._arc_inner_clearance(self.arc, vx_, vy_, vth_)
+                            c_old = self._arc_inner_clearance(saved_arc, vx_, vy_, vth_)
+                            if c_new is not None and (c_old is None or c_new > c_old):
+                                ok, text = True, "%s, wider because the heading already points into the corner (inner band corner %.1f instead of %.1f cm)" % (
+                                    text2, c_new * 100, (c_old if c_old is not None else float('nan')) * 100)
+                        if not ok:
+                            self.arc = dict(saved_arc)
                     if ok:
                         # Pylons: the anchored radius is no longer freely
                         # chosen. If it comes closer to a pylon than the
