@@ -504,6 +504,12 @@ class Round1Controller(Node):
         # Sideways error at the start pose compensated by the first two
         # full-lock arcs (_park_lateral_compensation). 1 = fully, 0 = off.
         'park_lat_comp':            ('park_lat_comp',            1.0, float),
+        # Limits of that compensation. CCW approaches forward on the pass line
+        # (0.305 m) and reaches the start pose (parking line 0.275 m) 4.4-5.3
+        # cm too far out; at 4 cm / 3 cm arc change it was skipped every time
+        # and the car parked ~5 cm too far from the wall (sim_11-14).
+        'park_lat_comp_max':        ('park_lat_comp_max',        0.06, float),   # m sideways
+        'park_lat_comp_arc_max':    ('park_lat_comp_arc_max',    5.0, float),    # cm per arc
         'park_heading_tol_deg':     ('park_heading_tol_deg',     2.5, float),
         # Plausibility: the straight approach must not be longer than this.
         'park_max_approach':        ('park_max_approach',        1.20, float),
@@ -3729,7 +3735,7 @@ class Round1Controller(Node):
         lat = getattr(self, 'park_start_lat_off', 0.0) * self.park_lat_comp
         if abs(lat) < 0.005:
             return seq, False
-        lat = max(-0.04, min(0.04, lat))
+        lat = max(-self.park_lat_comp_max, min(self.park_lat_comp_max, lat))
         arcs = [k for k, (st, cm) in enumerate(seq) if abs(st) >= 50.0 and abs(cm) >= 1.0][:3]
         if len(arcs) < 2:
             return seq, False
@@ -3752,7 +3758,7 @@ class Round1Controller(Node):
         except Exception as err:          # model trouble must never stop parking
             self.get_logger().warn("Parking: sideways compensation skipped (%s)." % err)
             return seq, False
-        if np.max(np.abs(d)) > 3.0:
+        if np.max(np.abs(d)) > self.park_lat_comp_arc_max:
             self.get_logger().warn(
                 "Parking: sideways compensation would change an arc by %.1f cm -- skipped."
                 % np.max(np.abs(d)))
