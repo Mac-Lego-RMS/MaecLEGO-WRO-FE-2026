@@ -212,9 +212,16 @@ class Round1Controller(Node):
         # that does. Measured from 0.70 instead of 0.86: ~13 cm. 0 = off.
         'corner_entry_pref':  ('corner_entry_pref', 1.0, lambda v: bool(float(v))),
         # planned on top of arc_pylon_clearance: the arc ends up to 7 cm
-        # inside the circle (sim_11 corner 2: planned 8.1, driven 2.5-5.8 cm)
-        'corner_entry_extra': ('corner_entry_extra', 0.04, float),
+        # inside the circle (sim_11 corner 2: planned 8.1, driven 2.5-5.8 cm;
+        # sim_14: 8 cm inside again -> 0.08)
+        'corner_entry_extra': ('corner_entry_extra', 0.08, float),
         'corner_entry_slope': ('corner_entry_slope', 0.35, float),   # lat/long of the change
+        # Pylon right at the corner exit, passed on the OUTER side: plan the
+        # exit this much closer to the outer wall. The arc ends ~8 cm inside
+        # the circle, i.e. towards the pylon (sim_14 corner 2: planned 0.19,
+        # came out at 0.27-0.29, touched the red), towards the wall there were
+        # 27 cm. Not onto the start straight (magenta walls). 0 = off.
+        'corner_exit_outer_bias': ('corner_exit_outer_bias', 0.06, float),
         # Pylons at the corner entry/exit: check the arc against the car
         # outline and choose the radius so that at least this clearance
         # remains (parken_test_20: R 0.50 left 3 mm to the red pylon at the
@@ -753,6 +760,10 @@ class Round1Controller(Node):
             self.declare_parameter(name, default)
         # structural (read once)
         self.declare_parameter('require_button', False)
+        # false: ignore the camera pylons (/obstacles_live) and pass the same to
+        # the scan_processor (see _scan_args) -- for runs with sim_obstacles.
+        # The colour scan itself keeps running, so it can be recorded.
+        self.declare_parameter('color_obstacles', True)
         # unpark is THE switch. unpark_only is a sub-option of it: stop after
         # the sequence instead of driving the race -- for tuning the step
         # sequence.
@@ -838,7 +849,11 @@ class Round1Controller(Node):
 
         self._load_params()
         self.require_button = bool(self.get_parameter('require_button').value)
-        self.unpark = bool(self.get_parameter('unpark').value)
+        self.color_obstacles = bool(self.get_parameter('color_obstacles').value)
+        if not self.color_obstacles:
+            self.get_logger().warn(
+                'color_obstacles=false: camera pylons are ignored, only sim_obstacles count.')
+        self.unpark =bool(self.get_parameter('unpark').value)
         self.unpark_only = bool(self.get_parameter('unpark_only').value)
         self.park = bool(self.get_parameter('park').value)
         self.unpark_invert_direction = bool(
@@ -1605,7 +1620,7 @@ class Round1Controller(Node):
                          and self.park_hold_s <= 0.0) else None)
             q = self._obstacle_offset_near_corner(w, self.corners[idx], bound)
             if q is not None:
-                return q                      # first obstacle after the corner
+                return self._corner_exit_bias(idx, w, q)   # first obstacle after the corner
         # Last corner without an obstacle behind it: come out of the corner
         # straight onto the parking line, then nothing has to be manoeuvred on
         # the finish straight any more.
@@ -1622,6 +1637,21 @@ class Round1Controller(Node):
         if auto is not None:
             return auto
         return self.o_out_list[idx] if idx < len(self.o_out_list) else self.o_out
+
+    def _corner_exit_bias(self, idx, w, q):
+        """o_out closer to the outer wall if the first pylon after the corner
+        stands right at the exit and is passed on the outer side."""
+        if (self.corner_exit_outer_bias <= 0.0 or q >= 0.35 or not self.obstacles
+                or self._outer_margin(w) > 0.0):
+            return q
+        c = self.corners[idx]
+        mine = [o for o in self.obstacles if o['wall'] == w]
+        if not mine:
+            return q
+        near = min(mine, key=lambda o: math.hypot(o['x'] - c[0], o['y'] - c[1]))
+        if math.hypot(near['x'] - c[0], near['y'] - c[1]) > 1.30:
+            return q                          # not in the entry row of the straight
+        return max(self.obs_wall_margin + 0.01, q - self.corner_exit_outer_bias)
 
     def _obs_planner_for_wall(self, wall_idx):
         from ekf.obstacle_path import ObstaclePathPlanner
@@ -2407,7 +2437,7 @@ class Round1Controller(Node):
         voted on. After the latch the buffer is no longer needed -- then
         /obstacles and the obstacle path do the planning.
         """
-        if self.pose is None or self.geometry_ready():
+        if not self.color_obstacles or self.pose is None or self.geometry_ready():
             return
         x, y, th = self.pose
         c, s = math.cos(th), math.sin(th)
@@ -4973,8 +5003,8 @@ class Round1Controller(Node):
             push_out = (self.min_turn_radius - R) * denom
             min_out = self.turn_anchor_min_out
             if o_out is not None:
-                min_out = max(self.turn_anchor_out_floor,
-                              min(min_out, o_out - self.turn_anchor_out_tol))
+                floor = min(self.turn_anchor_out_floor, o_out - 0.03)
+                min_out = max(floor, min(min_out, o_out - self.turn_anchor_out_tol))
             if o_out is not None and o_out - push_out < min_out:
                 return False, ("even with radius %.2f m it would come out %.2f m from "
                                "the outer wall (minimum %.2f)"
@@ -5889,6 +5919,8 @@ def _scan_args(argv):
     sim = ''.join(ch for ch in vals.get('sim_obstacles', '') if ch.isalnum() or ch in ':+')
     if sim:
         args += ' -p sim_obstacles:=' + sim
+    if vals.get('color_obstacles', '').lower() in ('false', '0'):
+        args += ' -p color_obstacles:=false'
     park = _park_test_scan_args(argv)
     return args + (' ' + park if park else '')
 
