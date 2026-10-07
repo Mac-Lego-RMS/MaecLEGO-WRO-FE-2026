@@ -196,7 +196,9 @@ class Round1Controller(Node):
         # ... but never above the PLANNED exit minus this: a pylon at the
         # corner exit on the outer side gives o_out 0.19, then 1 cm of push
         # already failed the check (sim_3 corner 3: two emergency manoeuvres).
-        'turn_anchor_out_tol': ('turn_anchor_out_tol', 0.03, float),
+        # sim_4: 3 cm late at T_A (one control tick at 0.8 m/s) -> 0.16 m
+        # exit, rejected against 0.16 -> manoeuvre, rolled 51 cm into the wall.
+        'turn_anchor_out_tol': ('turn_anchor_out_tol', 0.05, float),
         'turn_anchor_out_floor': ('turn_anchor_out_floor', 0.14, float),
         # Clearance car edge -> corner of the INNER band over the arc. On the
         # inner line (o_in = o_out = 0.81) the 0.50 m arc passed the inner
@@ -290,15 +292,18 @@ class Round1Controller(Node):
         # seat grid is filled and standing still would only cost time)
         'scan_pause':       ('scan_pause',       1.0, lambda v: bool(float(v))),
         'scan_pause_s':     ('scan_pause_s',     1.5, float),   # how long to stand still [s]
-        'scan_front_dist':  ('scan_front_dist',  1.10, float),  # ALWAYS stop this far from the front wall (pose)
+        # sim_3: 1.12-1.16 m too far back, sim_4: 1.00 m a bit too far
+        # forward and 1.17 m (inner exit) too far back -> one target for all.
+        'scan_front_dist':  ('scan_front_dist',  1.05, float),  # ALWAYS stop this far from the front wall (pose)
         # Closer to the corner when the corner allows it: hold at
         # max(scan_front_dist_min, o_out + min_turn_radius + margin), at most
         # scan_front_dist. At 1.10 m the LiDAR stands exactly at the face of
         # the inner band -- the far pylons of the next straight are grazed
         # (sim_3 hold 3: exit pylon 0.5 points per scan). Only if the next
         # straight already has a pylon with colour (o_out is then known);
-        # otherwise the hold decides o_out and keeps 1.10. 0 = always 1.10.
-        'scan_front_dist_min': ('scan_front_dist_min', 0.95, float),
+        # otherwise the hold decides o_out and keeps 1.10. 0 = always
+        # scan_front_dist (default since sim_4: the holds should be uniform).
+        'scan_front_dist_min': ('scan_front_dist_min', 0.0, float),
         'scan_hold_turn_margin': ('scan_hold_turn_margin', 0.05, float),
         # It still rolls this far after the halt command (measured ~13 cm).
         # The halt is triggered this much earlier, otherwise it stands right
@@ -310,7 +315,9 @@ class Round1Controller(Node):
         #   coast = v * scan_coast_t + v^2 / (2 * scan_brake_decel)
         # (at 0.35 m/s = 14 cm). scan_brake_decel <= 0 -> fixed scan_coast.
         'scan_coast_t':     ('scan_coast_t',     0.10, float),
-        'scan_brake_decel': ('scan_brake_decel', 0.57, float),
+        # sim_4: at 0.55-0.59 m/s it rolled 29-30 cm, the model said 32-37
+        # (stopped up to 7 cm before the target) -> 0.67.
+        'scan_brake_decel': ('scan_brake_decel', 0.67, float),
         # Brake ahead of time towards the halt point (as at the finish): if it
         # then always arrives at ~0.15 m/s, the coast is small and constant.
         # 0 = off.
@@ -378,6 +385,11 @@ class Round1Controller(Node):
         # speed profile (distance-based)
         'v_drive':       ('v_drive',       0.75,  float),   # straight cruise
         'v_turn':        ('v_turn',        0.55,  float),   # through the arc
+        # Arcs with the smallest radius (pylon at the corner exit, inner band
+        # corner): approach and drive them at most this fast. At 0.8 m/s one
+        # control tick is 4 cm past T_A, and it needs ~0.5 m to stop
+        # (sim_3/sim_4 corner 3). 0 = off.
+        'v_tight_turn':  ('v_tight_turn',  0.40,  float),
         'accel_dist':    ('accel_dist',    0.2,   float),   # ramp v_turn->v_drive after a corner
         # Accelerate already in the END of the corner: from this much remaining
         # heading (deg, after the dead time) v rises from v_turn towards
@@ -5155,8 +5167,16 @@ class Round1Controller(Node):
             rb = max(0.0, min(1.0, dist_to_TA / self.brake_dist))
         else:
             rb = 1.0
-        v_brk = self.v_turn + rb * (self.v_drive - self.v_turn)
+        v_end = self._v_turn_eff()
+        v_brk = v_end + rb * (self.v_drive - v_end)
         return min(v_acc, v_brk)
+
+    def _v_turn_eff(self):
+        """v_turn, or v_tight_turn for an arc with (nearly) the smallest radius."""
+        if (self.v_tight_turn > 0.0 and self.arc is not None
+                and self.arc.get('R', 1.0) <= self.min_turn_radius + 0.03):
+            return min(self.v_turn, self.v_tight_turn)
+        return self.v_turn
 
     def _drive(self, x, y, theta):
         """Lane-following on the current straight (Stanley holds the centre line).
@@ -5458,7 +5478,7 @@ class Round1Controller(Node):
         theta_err = wrap(self.arc['theta_target'] - thp)
 
         # speed: v_turn, rising towards v_drive at the end of the corner
-        v_cmd = self.v_turn
+        v_cmd = self._v_turn_eff()
         if (self.turn_exit_accel_deg > 0.0 and self.v_drive > self.v_turn
                 and not self._finish_straight_next()):
             lim = math.radians(self.turn_exit_accel_deg)
