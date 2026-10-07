@@ -37,6 +37,13 @@ SMALL_SHIFT_SLOPE = 0.20    # ... but at most this steep on average, at least
 COLOR_UNKNOWN, COLOR_RED, COLOR_GREEN = 0, 1, 2
 
 
+def _passes_like_red(color):
+    """Which side rule applies: only a pylon KNOWN to be red is passed like
+    red. Colour unknown counts as green (07.10.2026, was: like red) -- on the
+    field it was the green pylons that came in late or with a stray red vote."""
+    return color == COLOR_RED
+
+
 class ObstaclePathPlanner:
     def __init__(self, lane_width=1.00, clear_before=0.20, clear_after=0.20,
                  transition_pref=0.60, transition_min=0.40, wall_margin=0.12,
@@ -76,7 +83,7 @@ class ObstaclePathPlanner:
         So red+CCW and green+CW both mean "pass on the OUTER side" (small q),
         the other two mean "pass on the INNER side" (large q).
         """
-        pass_outer = ((color != COLOR_GREEN) == bool(ccw))
+        pass_outer = (_passes_like_red(color) == bool(ccw))
         if pass_outer:
             near, far = min(self.outer_margin, obstacle_q - BLOCK_HALF), obstacle_q - BLOCK_HALF
         else:
@@ -90,7 +97,7 @@ class ObstaclePathPlanner:
         """Does it pass the pylon from q on the correct side with
         PASS_KEEP_CLEAR clearance, without getting closer than wall_margin to a
         wall (or to the obstacle at the outer wall)?"""
-        if ((color != COLOR_GREEN) == bool(ccw)):          # pass on the outside
+        if (_passes_like_red(color) == bool(ccw)):          # pass on the outside
             outer_min = max(self.wall_margin,
                              self.outer_margin + ROBOT_HALF + PASS_KEEP_CLEAR
                              if self.outer_margin > 0.0 else 0.0)
@@ -101,7 +108,7 @@ class ObstaclePathPlanner:
 
     def gap_width(self, obstacle_q, color, ccw):
         """Free width of the gap we plan to drive through [m] (for diagnostics)."""
-        if ((color != COLOR_GREEN) == bool(ccw)):
+        if (_passes_like_red(color) == bool(ccw)):
             return obstacle_q - BLOCK_HALF - self.outer_margin
         return self.lane_width - (obstacle_q + BLOCK_HALF)
 
@@ -109,7 +116,7 @@ class ObstaclePathPlanner:
     def pass_band(self, obstacle_q, color, ccw):
         """(lo, hi): offsets from which it passes this obstacle on the correct
         side with PASS_KEEP_CLEAR -- the same range as _gets_past."""
-        if ((color != COLOR_GREEN) == bool(ccw)):          # pass on the outside
+        if (_passes_like_red(color) == bool(ccw)):          # pass on the outside
             lo = max(self.wall_margin,
                      self.outer_margin + ROBOT_HALF + PASS_KEEP_CLEAR
                      if self.outer_margin > 0.0 else 0.0)

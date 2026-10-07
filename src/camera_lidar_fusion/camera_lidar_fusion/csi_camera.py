@@ -53,6 +53,10 @@ Parameters (ros2 param set /video_source <name> <value>):
   enhance_edge    no chroma boost where the luminance jumps by more than about
                   this (grey levels, 0 = off) -- suppresses colour fringes
   enhance_clahe   CLAHE clip limit on the luminance, 0 = off
+  mat_wb          white balance on the field mat, continuously (default off)
+  mat_wb_period_s how often the mat is measured
+  mat_wb_alpha    share of the new measurement per update (0..1)
+  mat_wb_gain_min / mat_wb_gain_max   limits of the R and B gain
 
 Colour shading: the PiCam 360 fisheye on the IMX219 does not match the
 sensor's micro lenses (chief ray angle). Towards the edge of the circle green
@@ -127,6 +131,11 @@ class CsiCamera(Node):
         d('enhance_r0', 0.45)
         d('enhance_edge', 25.0)
         d('enhance_clahe', 2.0)
+        d('mat_wb', False)
+        d('mat_wb_period_s', 0.5)
+        d('mat_wb_alpha', 0.3)
+        d('mat_wb_gain_min', 0.6)
+        d('mat_wb_gain_max', 1.6)
 
         qos = QoSProfile(depth=2, reliability=ReliabilityPolicy.RELIABLE,
                          history=HistoryPolicy.KEEP_LAST)
@@ -148,6 +157,10 @@ class CsiCamera(Node):
         self.circle = None            # (cx, cy, R) at the published size, from the shading file
         self.enh = None               # (chroma gain map at half size, CLAHE or None)
         self.shade_reload = False
+        self.wb_gain = [1.0, 1.0]     # mat white balance: (B, R) on top of the shading
+        self.wb_ring = None           # (ys, xs, sector) of the mat ring, see _mat_ring
+        self.wb_t = 0.0
+        self.wb_info = ''
         self._load_shading()
         self._load_enhance()
         self.add_on_set_parameters_callback(self._on_params)
@@ -384,6 +397,10 @@ class CsiCamera(Node):
         shade = self.shade
         if shade is not None and shade.shape == bgr.shape:
             bgr = cv2.multiply(bgr, shade, scale=1.0 / 64.0)
+        if self._p('mat_wb'):
+            self._mat_wb_update(bgr)
+            gb, gr = self.wb_gain
+            bgr = cv2.multiply(bgr, (gb, 1.0, gr, 0.0))
         if self.enh is not None:
             bgr = self._enhance(bgr)
         msg = Image()
@@ -404,11 +421,80 @@ class CsiCamera(Node):
         self.frames += 1
         self.fails = 0
 
+    # ------------------------------------------------------------ mat white balance
+    def _mat_ring(self, shape):
+        """Pixels of the mat ring just inside the rim of the circle, thinned out,
+        with their 15 degree sector. The mat close to the robot shows there in
+        nearly every direction (0.3-0.45 m in front of the lens)."""
+        h, w = shape[:2]
+        if self.circle is not None:
+            cx, cy, rad = self.circle
+        else:
+            try:
+                c = np.load(self._p('shading_file')); k = w / float(c['width'])
+                cx, cy, rad = float(c['cx']) * k, float(c['cy']) * k, float(c['R']) * k
+            except Exception:
+                cx, cy, rad = 0.511 * w, 0.4875 * h, 0.445 * w
+        yy, xx = np.mgrid[0:h:3, 0:w:3]
+        rn = np.hypot(xx - cx, yy - cy) / rad
+        m = (rn > 0.93) & (rn < 0.985)
+        az = (np.degrees(np.arctan2(yy[m] - cy, xx[m] - cx)) % 360.0)
+        self.wb_ring = (yy[m], xx[m], (az / 15.0).astype(np.int32))
+
+    def _mat_wb_update(self, bgr):
+        """White balance on the mat, measured AFTER the shading map and BEFORE the
+        chroma boost (07.10.2026). A fixed white balance only holds for one light:
+        in the afternoon the room went warm, the mat read B/G 0.70 instead of
+        1.0, magenta parking walls came out red and green pylons olive. Per 15
+        degree sector the brightest quarter of the ring is the mat; the median
+        over the sectors throws out parking walls, pylons and the cut-off lens
+        edges. Needs 5 usable sectors, otherwise the gain stays. Slow (EMA)
+        and limited, so a single odd frame cannot throw the colours off."""
+        now = time.monotonic()
+        if now - self.wb_t < float(self._p('mat_wb_period_s')):
+            return
+        self.wb_t = now
+        if self.wb_ring is None or self.wb_ring[0].size == 0:
+            self._mat_ring(bgr.shape)
+        ys, xs, sec = self.wb_ring
+        if ys.size == 0 or ys.max() >= bgr.shape[0] or xs.max() >= bgr.shape[1]:
+            self.wb_ring = None
+            return
+        px = bgr[ys, xs].astype(np.float32)
+        lum = px.mean(axis=1)
+        rg, bg = [], []
+        for i in range(24):
+            m = sec == i
+            if m.sum() < 40:
+                continue
+            L = lum[m]
+            cut = max(float(np.percentile(L, 75)), 70.0)
+            sel = L >= cut
+            if sel.sum() < 15:
+                continue
+            p = px[m][sel]
+            g = np.maximum(p[:, 1], 1.0)
+            r_ = float(np.median(p[:, 2] / g)); b_ = float(np.median(p[:, 0] / g))
+            if 0.4 < r_ < 2.5 and 0.4 < b_ < 2.5:
+                rg.append(r_); bg.append(b_)
+        if len(rg) < 5:
+            self.wb_info = ' | mat WB: only %d mat sectors, gains kept' % len(rg)
+            return
+        lo, hi = float(self._p('mat_wb_gain_min')), float(self._p('mat_wb_gain_max'))
+        a = min(max(float(self._p('mat_wb_alpha')), 0.0), 1.0)
+        tgt_b = min(max(1.0 / float(np.median(bg)), lo), hi)
+        tgt_r = min(max(1.0 / float(np.median(rg)), lo), hi)
+        self.wb_gain = [self.wb_gain[0] + a * (tgt_b - self.wb_gain[0]),
+                        self.wb_gain[1] + a * (tgt_r - self.wb_gain[1])]
+        self.wb_info = ' | mat WB: gain B %.2f R %.2f (%d sectors)' % (
+            self.wb_gain[0], self.wb_gain[1], len(rg))
+
     # ------------------------------------------------------------ house-keeping
     def _poll(self):
         now = time.monotonic()
         if self.shade_reload:
             self.shade_reload = False
+            self.wb_ring = None       # size or circle may have changed
             self._load_shading()
             self._load_enhance()
         if self.restart_at is not None and now >= self.restart_at:
@@ -448,7 +534,7 @@ class CsiCamera(Node):
             if fps < 0.5 * float(self._p('framerate')):
                 self.get_logger().warn('only %.1f frames/s' % fps)
             else:
-                self.get_logger().info('%.1f frames/s' % fps)
+                self.get_logger().info('%.1f frames/s%s' % (fps, self.wb_info))
             if fps == 0.0:
                 self._stop()
                 self._schedule_restart()

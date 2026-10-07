@@ -42,10 +42,23 @@ SNAP_MAX_DIST = 0.12       # a detection further than this from any seat is
                            # not an obstacle (seats are 0.2 m apart)
 MIN_SEAT_VOTES = 3         # votes before a seat counts as occupied
 COLOR_MAX_DIST = 1.60      # colour is only believed within this range
+MIN_COLOR_VOTES = 2        # a colour needs this many votes and more than the
+                           # other colour, otherwise 'unknown' (07.10.2026: cam_23,
+                           # green #17 came in RED from one stray vote at the end of
+                           # a turn, 30 green ones only followed -- the straight was
+                           # planned for red). 'unknown' is passed like green.
 SIBLING_MIN_RATIO = 0.35   # weaker of two same-row seats must reach this share
 MAX_PER_STRAIGHT = 2       # rules: never more than 2 obstacles on a straight
 
 FAR = 'far'                # vote key for "seen, but too far to trust colour"
+COLOR_NEAR_DIST = 0.90     # colour votes from closer count fully ...
+MID_WEIGHT = 1.0 / 3.0     # ... from here to COLOR_MAX_DIST only this much
+MID = '_mid'               # suffix of the vote key for those ('red_mid', 'green_mid')
+# Why (07.10.2026, cam_23/24/26, live detections on known pylons): red pylons
+# read red at every range (96-100 %), green ones only up to 0.9 m (98 %) --
+# from 0.9 to 1.6 m 20-30 % of them came out RED. Green pylons are first seen
+# from there, so their first colour votes were often red: #17 (cam_23) and #11
+# (cam_26) went into the map red and the straight was planned the wrong way.
 
 
 def robot_to_map(x, y, pose):
@@ -97,7 +110,12 @@ class ObstacleMap:
                 self.rejected += 1
                 continue
 
-            key = det['color'] if det['dist'] <= self.color_max_dist else FAR
+            if det['dist'] <= COLOR_NEAR_DIST:
+                key = det['color']
+            elif det['dist'] <= self.color_max_dist:
+                key = det['color'] + MID
+            else:
+                key = FAR
             self.votes[best][key] += 1
 
     # ------------------------------------------------------------------ #
@@ -111,13 +129,16 @@ class ObstacleMap:
             total = sum(keys.values())               # occupancy: all ranges
             if total < min_votes:
                 continue
-            coloured = {k: n for k, n in keys.items() if k != FAR}
-            color = (max(coloured.items(), key=lambda kv: kv[1])[0]
-                     if coloured else 'unknown')
+            red = keys.get('red', 0) + MID_WEIGHT * keys.get('red' + MID, 0)
+            green = keys.get('green', 0) + MID_WEIGHT * keys.get('green' + MID, 0)
+            if max(red, green) >= MIN_COLOR_VOTES and red != green:
+                color = 'red' if red > green else 'green'
+            else:
+                color = 'unknown'
             si, k, sp, col, row = self.seats[sid]
             out.append({'seat_id': sid, 'straight': si, 'column': col,
                         'row': row, 'p': sp, 'color': color, 'votes': total,
-                        'color_votes': sum(coloured.values())})
+                        'color_votes': round(red + green, 2)})
         return out
 
     @staticmethod

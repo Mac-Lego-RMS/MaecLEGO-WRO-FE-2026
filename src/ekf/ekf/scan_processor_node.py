@@ -151,6 +151,13 @@ COLOUR_MAX_YAWRATE = 0.6       # rad/s
 # pylons while parking.
 OBS_FREEZE_LAP = 1
 START_SCAN_TIMEOUT = 2.0       # s after the commit; then report 'incomplete'
+# A seat the LiDAR hits but whose colour is still open gets more time, and a
+# lower bar: from the bay the camera may look at the shaded side of the pylon
+# (cam_17: green #19 0.45 m beside the bay, G-R only +2..+5, ONE green vote in
+# 5 s -- unparking took it as "no pylon" and drove the outer sequence).
+START_SCAN_TIMEOUT_UNKNOWN = 5.0   # s, while a hit seat has no colour yet
+START_SEAT_MIN_HITS = 5        # LiDAR hits before a seat counts as surely occupied
+START_SEAT_RELAXED = False     # the 1-vote rule above -- off, see _start_seat_relaxed_colour
 START_SCAN_MAX_ALONG = 0.75    # only seats up to this far along the straight (ahead
                                # or behind) from the rear axle. The far seat
                                # (~1 m) cannot be seen from the bay and does not
@@ -349,6 +356,9 @@ class ScanProcessor(Node):
         # None (before the commit) | 'parked' | 'exiting' | 'clear'
         self.bay_phase = None
         self.start_scan_state = None # None | 'scanning' | 'complete' | 'incomplete'
+        # start seats decided by the relaxed rule (see START_SEAT_MIN_HITS),
+        # published like detected pylons until the map has its own entry
+        self.start_scan_extra = []
         self.start_scan_t0 = None
         self.seat_free = {}          # seat id -> scans that saw past the seat
         self.seat_hit = {}           # seat id -> scans with a hit at the seat
@@ -1189,12 +1199,46 @@ class ScanProcessor(Node):
             if (self.seat_free.get(sid, 0) >= SEAT_FREE_SCANS
                     and self.seat_hit.get(sid, 0) * 4 <= self.seat_free.get(sid, 0)):
                 continue
+            if self._start_seat_relaxed_colour(sid) is not None:
+                continue
             open_seats.append(sid)
 
+        # a hit seat without colour waits longer than an unseen one
+        limit = (START_SCAN_TIMEOUT_UNKNOWN
+                 if any(self.seat_hit.get(sid, 0) > 0 for sid in open_seats)
+                 else START_SCAN_TIMEOUT)
         if not open_seats:
             self._finish_start_scan('complete')
-        elif time.monotonic() - self.start_scan_t0 > START_SCAN_TIMEOUT:
-            self._finish_start_scan('incomplete', f'time limit {START_SCAN_TIMEOUT:.1f} s')
+        elif time.monotonic() - self.start_scan_t0 > limit:
+            self._finish_start_scan('incomplete', f'time limit {limit:.1f} s')
+
+    def _start_seat_relaxed_colour(self, sid):
+        """Colour of a start seat by the relaxed rule, or None.
+
+        The seat must be surely occupied by the LiDAR (START_SEAT_MIN_HITS hits,
+        more hits than see-throughs), and the colour votes it has must all be
+        ONE colour -- then a single vote is enough. The normal map needs
+        MIN_SEAT_VOTES; from the bay the pylon may show its shaded side and
+        never get there, while the occupancy is beyond doubt. Contradicting
+        votes leave it open."""
+        # SWITCHED OFF (07.10.2026, cam_29): from the bay the camera sees the
+        # shaded side of the pylon, and the single vote it got there was RED on
+        # a green pylon -> outer sequence on the wrong side, pylon knocked
+        # over. A colour from the bay now needs the normal map rule; without
+        # one the controller drives its default and corrects after unparking
+        # (unpark_recheck). The rest stays for when this is revisited.
+        if not START_SEAT_RELAXED:
+            return None
+        hits = self.seat_hit.get(sid, 0)
+        if hits < START_SEAT_MIN_HITS or hits <= self.seat_free.get(sid, 0):
+            return None
+        votes = self.obstacle_map.votes.get(sid, {})
+        red, green = votes.get('red', 0), votes.get('green', 0)
+        if red > 0 and green == 0:
+            return 'red'
+        if green > 0 and red == 0:
+            return 'green'
+        return None
 
     def _obstacles_frozen(self):
         """After lap OBS_FREEZE_LAP (lap_state from the controller) the map is fixed."""
@@ -1270,15 +1314,24 @@ class ScanProcessor(Node):
 
     def _finish_start_scan(self, state, reason=''):
         self.start_scan_state = state
-        self.start_scan_pub.publish(String(data=state))
         seat_colour = {} if self.obstacle_map is None else {
             self._seat_id(o): o['color'] for o in self.obstacle_map.occupied_seats()}
         parts, n_occupied = [], 0
+        self.start_scan_extra = []
         for sid, _ in self._start_seats():
             colour = seat_colour.get(sid)
+            relaxed = None if colour in ('red', 'green') else self._start_seat_relaxed_colour(sid)
             if colour in ('red', 'green'):
                 parts.append(f'#{sid} {"red pillar" if colour == "red" else "green pillar"}')
                 n_occupied += 1
+            elif relaxed is not None:
+                n = self.obstacle_map.votes.get(sid, {}).get(relaxed, 0)
+                parts.append(f'#{sid} {relaxed} pillar ({n} vote(s), LiDAR {self.seat_hit.get(sid, 0)} hits)')
+                n_occupied += 1
+                si, k, sp, col, row = self.obstacle_map.seats[sid]
+                self.start_scan_extra.append({
+                    'seat_id': sid, 'straight': si, 'column': col, 'row': row,
+                    'p': sp, 'color': relaxed, 'votes': n, 'color_votes': n})
             elif (self.seat_free.get(sid, 0) >= SEAT_FREE_SCANS
                   and self.seat_hit.get(sid, 0) * 4 <= self.seat_free.get(sid, 0)):
                 parts.append(f'#{sid} free')
@@ -1301,6 +1354,12 @@ class ScanProcessor(Node):
             self.get_logger().info(text)
         else:
             self.get_logger().warn(text)
+        # /obstacles FIRST, then the state: the controller picks the unpark
+        # sequence the moment the state arrives, so a seat decided by the
+        # relaxed rule has to be in /obstacles by then.
+        if self.start_scan_extra and self.obstacle_map is not None:
+            self._publish_obstacles_if_changed()
+        self.start_scan_pub.publish(String(data=state))
 
     def _bay_opening_filter(self, dets):
         """Only detections seen through the opening of the bay.
@@ -2063,6 +2122,8 @@ class ScanProcessor(Node):
         occupied = self.obstacle_map.occupied_seats()
         ids = {self._seat_id(s) for s in occupied}
         occupied += [s for s in self.sim_seats if self._seat_id(s) not in ids]
+        ids = {self._seat_id(s) for s in occupied}
+        occupied += [s for s in self.start_scan_extra if self._seat_id(s) not in ids]
         state = tuple(sorted((self._seat_id(s), s['color']) for s in occupied))
         if state == self.obstacle_state:
             return
