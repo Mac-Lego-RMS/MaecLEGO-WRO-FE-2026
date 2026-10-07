@@ -576,6 +576,7 @@ class Round1Controller(Node):
         # and the car parked ~5 cm too far from the wall (sim_11-14).
         'park_lat_comp_max':        ('park_lat_comp_max',        0.06, float),   # m sideways
         'park_lat_comp_arc_max':    ('park_lat_comp_arc_max',    5.0, float),    # cm per arc
+        'park_lat_comp_along_max':  ('park_lat_comp_along_max',  0.02, float),   # m further back at most (reverse-only)
         'park_heading_tol_deg':     ('park_heading_tol_deg',     2.5, float),
         # Plausibility: the straight approach must not be longer than this.
         'park_max_approach':        ('park_max_approach',        1.20, float),
@@ -619,7 +620,15 @@ class Round1Controller(Node):
         # movement aborts the sampling of the start straight. If the topic
         # does not come (perception without start_from_bay), carry on after
         # this time.
-        'unpark_wait_scan_s':       ('unpark_wait_scan_s',       3.0, float),
+        'unpark_wait_scan_s':       ('unpark_wait_scan_s',       6.0, float),
+        # After unparking, check the pylon ahead once more: from the bay the
+        # camera may see its shaded side and no colour at all (cam_17/cam_19:
+        # green #19 0.45 m beside the bay, 0 colour votes in 5 s -> outer
+        # sequence; turned out, it was green at once). If the colour now known
+        # demands another sequence, and the one driven is the beginning of it
+        # (CCW: outer = inner with a shorter arc in move 3), pull the arc on and
+        # drive the rest of the other sequence. Once per run.
+        'unpark_recheck':           ('unpark_recheck',           1.0, lambda v: bool(float(v))),
         # The unpark sequence follows the NEAREST pylon AHEAD of the parked
         # robot, this far ahead (from base_link). NOT a fixed row: the bay
         # lies elsewhere depending on the layout (starts at 1.965 / 1.728 /
@@ -1019,6 +1028,11 @@ class Round1Controller(Node):
         self.start_scan_state = None  # /start_scan_state: scanning | complete | incomplete
         self.unpark_scan_wait_t0 = None
         self.unpark_variant = 'normal'  # 'normal' or 'inner'
+        self.unpark_chosen_variant = None   # variant decided at the plan (also if == normal table)
+        self.unpark_chosen_color = None     # colour of the deciding pylon then (None = none/unknown)
+        self.unpark_plan_pose = None        # pose at the decision (the bay)
+        self.unpark_redo_done = False       # the continuation happens at most once
+        self.unpark_cont = None             # (full sequence, variant) while continuing
         self.unpark_steps_std = []    # normal sequence (wire values) -- parking uses this one
         self.loc_state = None         # /localization_state: None = never received (like 'ok')
         self.loc_lost_t0 = None
@@ -2046,7 +2060,7 @@ class Round1Controller(Node):
             self.get_logger().info(
                 f"/obstacles: {len(obs)} obstacles " +
                 ", ".join(f"id{o['id']}(w{o['wall']},"
-                          f"{'green' if o['color']==2 else 'red'})" for o in obs))
+                          f"{'green' if o['color']==2 else 'red' if o['color']==1 else 'colour unknown -> as green'})" for o in obs))
         if self.state in ('DRIVE', 'SCAN_PAUSE') and self.arc is not None:
             if o_out_old is not None and self._replan_corner(o_out_old):
                 return
@@ -2794,6 +2808,10 @@ class Round1Controller(Node):
         self.unpark_steps_std = list(self.unpark_steps_run)
         self.unpark_variant = 'normal'
         variant, pyl = self._unpark_variant(direction)
+        self.unpark_chosen_variant = variant
+        self.unpark_chosen_color = (pyl['color'] if pyl is not None
+                                    and pyl['color'] in (OBST_RED, OBST_GREEN) else None)
+        self.unpark_plan_pose = self.pose
         seq_list = UNPARK_VARIANTS[(direction, variant)]
         reason = ("no pylon ahead of it" if pyl is None else
                   "pylon #%d %s ahead of it" % (pyl['id'], 'red' if pyl['color'] == OBST_RED
@@ -3131,6 +3149,13 @@ class Round1Controller(Node):
             return
 
     def _unpark_done(self, x, y, theta):
+        if self.unpark_cont is not None:
+            # continued into another sequence: from here on it counts as if
+            # that one had been driven from the start (parking reverses it)
+            full, variant = self.unpark_cont
+            self.unpark_cont = None
+            self.unpark_steps_run = full
+            self.unpark_variant = 'normal' if full == self.unpark_steps_std else variant
         self._unpark_pid(self.unpark_pid_after)
         self.publish_stop()
         self.unpark_end_pose = (x, y, theta)   # comparison after the scan hold
@@ -3156,6 +3181,87 @@ class Round1Controller(Node):
                 "whether to scan here.")
             return
         self._unpark_handover()
+
+    def _unpark_recheck(self):
+        """After unparking: does the pylon ahead of the bay, whose colour is
+        known by now, demand another sequence than the one driven? If the
+        driven sequence is the BEGINNING of the needed one -- same moves, the
+        last one shorter with the same steering (CCW: outer = inner with
+        12 instead of 37 cm in move 3) -- pull that arc on and drive the rest.
+        True = continuation started.
+
+        Only when the decision in the bay had NO colour: a colour that flips
+        later is the map arguing with itself, not a missed pylon."""
+        if (not self.unpark_recheck or self.unpark_redo_done
+                or self.unpark_mode != 'out' or self.unpark_plan_pose is None
+                or self.unpark_chosen_color is not None
+                or not self.unpark_steps_run or self.pose is None):
+            return False
+        saved = self.pose
+        self.pose = self.unpark_plan_pose          # judge from the bay, as at the plan
+        try:
+            variant, pyl = self._unpark_variant(self.unpark_direction)
+        finally:
+            self.pose = saved
+        if pyl is None or pyl['color'] not in (OBST_RED, OBST_GREEN):
+            return False
+        if variant == self.unpark_chosen_variant:
+            return False
+        self.unpark_redo_done = True
+        colour = 'red' if pyl['color'] == OBST_RED else 'green'
+        try:
+            needed = mirror_steps(
+                steps_from_flat(list(UNPARK_VARIANTS[(self.unpark_direction, variant)])),
+                self.unpark_direction == 'CCW')
+        except (KeyError, ValueError):
+            needed = []
+        cont = self._unpark_continuation(list(self.unpark_steps_run), needed)
+        if cont is None:
+            self.get_logger().error(
+                "Unparking: pylon #%d ahead of the bay is %s now -- it needs the %s "
+                "sequence, but the %s one driven is not its beginning. Carries on "
+                "as it stands." % (pyl['id'], colour, variant, self.unpark_chosen_variant))
+            return False
+        rest, k = cont
+        self.get_logger().warn(
+            "Unparking: pylon #%d ahead of the bay is %s now -- the %s sequence was "
+            "chosen without its colour, it needs the %s one. Pulls the arc of move %d "
+            "on by %+.1f cm and drives the remaining %d move(s)."
+            % (pyl['id'], colour, self.unpark_chosen_variant, variant, k + 1,
+               rest[0][1] if rest and k < len(self.unpark_steps_run) else 0.0,
+               len(rest) - (1 if k < len(self.unpark_steps_run) else 0)))
+        # the pose after the partial move is no move boundary of the needed
+        # sequence -- the end of its continuation takes that place
+        if k < len(self.unpark_steps_run) and len(self.unpark_trajectory) > 1:
+            self.unpark_trajectory.pop()
+        self.unpark_cont = (needed, variant)
+        self.unpark_pos_prev = None
+        self._unpark_pid(self.unpark_pid)
+        self._park_start_moves(rest, 'out')
+        return True
+
+    @staticmethod
+    def _unpark_continuation(driven, needed, tol_cm=0.05, tol_steer=0.005):
+        """If ``driven`` is the beginning of ``needed`` (all moves equal, only the
+        last one possibly shorter with the same steering and direction):
+        (remaining moves, index of the continued move), else None. Empty
+        trailing moves of ``driven`` (steering only) do not count."""
+        d = list(driven)
+        while d and abs(d[-1][1]) < tol_cm:
+            d.pop()
+        if not d or len(d) > len(needed):
+            return None
+        same = lambda a, b: abs(a[0] - b[0]) <= tol_steer and abs(a[1] - b[1]) <= tol_cm
+        if not all(same(a, b) for a, b in zip(d[:-1], needed)):
+            return None
+        k = len(d) - 1
+        (sd, cd), (sn, cn) = d[k], needed[k]
+        if abs(sd - sn) > tol_steer or cd * cn <= 0 or abs(cd) > abs(cn) + tol_cm:
+            return None
+        rest = needed[k + 1:]
+        if abs(cn - cd) > tol_cm:
+            return [(sn, cn - cd)] + rest, k
+        return (rest, len(driven)) if rest else None
 
     def _park_straight(self):
         """Outer wall (inward-pointing HNF) and direction of travel of the
@@ -3867,6 +3973,17 @@ class Round1Controller(Node):
         except Exception as err:          # model trouble must never stop parking
             self.get_logger().warn("Parking: sideways compensation skipped (%s)." % err)
             return seq, False
+        # Reverse arcs only: the car ends further back in the bay. cam_25: 5.6
+        # cm compensated that way (plus -2.2 cm for the heading, -8.3 cm bay
+        # placement) put the rear past the rear magenta wall. Cap that shift.
+        along = float(J[2, :n] @ d) if n < 3 else 0.0
+        part = ''
+        if n < 3 and abs(along) > self.park_lat_comp_along_max > 0.0:
+            f = self.park_lat_comp_along_max / abs(along)
+            d = d * f
+            part = ' (only %.0f %% -- otherwise %.1f cm further back in the bay)' % (
+                f * 100, abs(along) * 100)
+            lat = lat * f
         if np.max(np.abs(d)) > self.park_lat_comp_arc_max:
             self.get_logger().warn(
                 "Parking: sideways compensation would change an arc by %.1f cm -- skipped."
@@ -3881,7 +3998,7 @@ class Round1Controller(Node):
                ', '.join("move %d %.1f instead of %.1f cm" % (k + 1, abs(out[k][1]), abs(seq[k][1]))
                          for k in arcs),
                ', same position along the bay' if len(arcs) >= 3
-               else '; reverse arcs only, ends a bit further back in the bay'))
+               else '; reverse arcs only, ends a bit further back in the bay') + part)
         return out, True
 
     def _park_reference_from_sequence(self, seq):
@@ -4066,6 +4183,8 @@ class Round1Controller(Node):
         The direction is already set and sent at this point -- that happens
         in _unpark_done, before the scan hold.
         """
+        if self._unpark_recheck():
+            return
         # Record the park start pose NOW, not right after the last move: in
         # between lies the scan hold, in which the direction goes to the
         # scan_processor and that switches the map. A jump of the pose at the
