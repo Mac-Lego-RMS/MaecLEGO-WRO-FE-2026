@@ -582,7 +582,8 @@ class Round1Controller(Node):
         'park_max_approach':        ('park_max_approach',        1.20, float),
         # Steepest swing back onto the parking line after the last obstacle
         # (metres lateral per metre along). Measured clean: ~1.0.
-        'park_return_slope_max':    ('park_return_slope_max',    0.90, float),
+        # measured ~1.0 (40 cm lateral over 40 cm); 0.90 -> 1.0 (cam_31)
+        'park_return_slope_max':    ('park_return_slope_max',    1.00, float),
         # Swing onto the parking line after the last pylon of the finish
         # straight: start as early as the car edge keeps this much to the
         # pylon (the cosine ramp hardly moves at first), and only as long as
@@ -2384,6 +2385,10 @@ class Round1Controller(Node):
                                                      last_s, s_stop - 0.05)
                     s0 = max(s0, 0.0)               # not behind the car
                     keep = [(sv, qv) for (sv, qv) in pts if sv <= s0 + 1e-6] or [pts[0]]
+                elif self.finish_return_clear > 0.0:
+                    # pylon already behind the car (cam_31: 18 cm behind at the
+                    # corner exit): nothing to wait for, only the slope limits
+                    L = min(L, max(needed, self.obs_transition_min))
                 keep += [(s0, q_last), (s0 + L, q_park), (s_until, q_park)]
                 self.get_logger().info(
                     "Finish straight: after the last obstacle back onto the "
