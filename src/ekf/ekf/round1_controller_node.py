@@ -635,6 +635,20 @@ class Round1Controller(Node):
         # (CCW: outer = inner with a shorter arc in move 3), pull the arc on and
         # drive the rest of the other sequence. Once per run.
         'unpark_recheck':           ('unpark_recheck',           1.0, lambda v: bool(float(v))),
+        # Short sequence first (07.10.2026): if one sequence of this direction
+        # is the beginning of the other (CCW: outer = inner with a shorter arc
+        # in move 3), ALWAYS drive the short one, without scanning in the bay
+        # -- from there the camera sees the shaded side of the pylon and read
+        # green as red (cam_29). Then stand, look at the lit side, and either
+        # pull the arc on into the long sequence or drive off. CW: the tables
+        # differ from move 2 on, there it stays the decision in the bay.
+        'unpark_short_first':       ('unpark_short_first',       1.0, lambda v: bool(float(v))),
+        # after the short sequence: wait this long at most for the colour of
+        # the pylon ahead; still unknown then -> taken as green (like the planner)
+        'unpark_colour_wait_s':     ('unpark_colour_wait_s',     2.5, float),
+        # ... and stand at least this long before deciding "no pylon ahead":
+        # the map needs a few scans to put a pylon in at all
+        'unpark_look_min_s':        ('unpark_look_min_s',        1.0, float),
         # The unpark sequence follows the NEAREST pylon AHEAD of the parked
         # robot, this far ahead (from base_link). NOT a fixed row: the bay
         # lies elsewhere depending on the layout (starts at 1.965 / 1.728 /
@@ -2202,6 +2216,7 @@ class Round1Controller(Node):
         sides_clear = self.sides_clear and self._on_finish_straight()
         s_hold = 0.0
         all_ahead = []
+        beside = []
         if sides_clear:
             self.park_drive_target_f = None
             ccw_ = self.dir_step() > 0
@@ -2360,16 +2375,20 @@ class Round1Controller(Node):
                 keep.append((s_until, q_park))
             elif s_back - last_s >= needed:
                 s0, L = last_s, s_back - last_s
-                if obs_lane and self.finish_return_clear > 0.0:
-                    s0, L = self._finish_return_ramp(
-                        max(obs_lane, key=lambda t: t[0]), q_last, q_park, needed,
-                        last_s, s_stop - 0.05)
+                # the last pylon -- ahead, or (planned at the corner exit, cam_30)
+                # the one right beside the car, which is no longer in obs_lane
+                ref = (max(obs_lane, key=lambda t: t[0]) if obs_lane
+                       else max(beside, key=lambda t: t[0]) if beside else None)
+                if ref is not None and self.finish_return_clear > 0.0:
+                    s0, L = self._finish_return_ramp(ref, q_last, q_park, needed,
+                                                     last_s, s_stop - 0.05)
+                    s0 = max(s0, 0.0)               # not behind the car
                     keep = [(sv, qv) for (sv, qv) in pts if sv <= s0 + 1e-6] or [pts[0]]
                 keep += [(s0, q_last), (s0 + L, q_park), (s_until, q_park)]
                 self.get_logger().info(
                     "Finish straight: after the last obstacle back onto the "
                     "parking line (q %.2f -> %.2f over %.2f m, from %.2f m after the pylon)."
-                    % (q_last, q_park, L, s0 - (max(t[0] for t in obs_lane) if obs_lane else s0)))
+                    % (q_last, q_park, L, s0 - (ref[0] if ref is not None else s0)))
             elif s_over is not None:
                 keep += [(last_s, q_last), (s_over, q_park),
                          (s_over + 0.30, q_park)]
@@ -2847,6 +2866,15 @@ class Round1Controller(Node):
         self.unpark_steps_std = list(self.unpark_steps_run)
         self.unpark_variant = 'normal'
         variant, pyl = self._unpark_variant(direction)
+        pair = self._short_first_pair(direction)
+        if pair is not None:
+            # decided AFTER the short sequence, see unpark_short_first
+            variant, pyl = pair[0], None
+            self.get_logger().info(
+                "Unparking %s: short sequence first (%s), the pylon ahead is looked "
+                "at afterwards -- then pull on into the %s one or drive off."
+                % (direction, pair[0], pair[1]))
+        self.unpark_short_active = pair is not None
         self.unpark_chosen_variant = variant
         self.unpark_chosen_color = (pyl['color'] if pyl is not None
                                     and pyl['color'] in (OBST_RED, OBST_GREEN) else None)
@@ -2998,7 +3026,8 @@ class Round1Controller(Node):
             # standstill, every movement aborts it. Only with 'complete' is
             # /obstacles complete for the start straight -- a missing seat is
             # then MEASURED empty, not overlooked. The choice of the unpark sequence depends on it.
-            if self.start_scan_state not in ('complete', 'incomplete'):
+            if (self.start_scan_state not in ('complete', 'incomplete')
+                    and self._short_first_pair(own_dir) is None):
                 if self.unpark_scan_wait_t0 is None:
                     self.unpark_scan_wait_t0 = t_now
                 waited = t_now - self.unpark_scan_wait_t0
@@ -3221,6 +3250,35 @@ class Round1Controller(Node):
             return
         self._unpark_handover()
 
+    def _short_first_pair(self, direction):
+        """(short, long) variant names if short-first applies to this
+        direction: the short table is the exact beginning of the long one.
+        None otherwise (or switched off)."""
+        if not getattr(self, 'unpark_short_first', False) or direction not in ('CW', 'CCW'):
+            return None
+        for short, long_ in (('outer', 'inner'), ('inner', 'outer')):
+            try:
+                a = steps_from_flat(list(UNPARK_VARIANTS.get((direction, short), [])))
+                b = steps_from_flat(list(UNPARK_VARIANTS.get((direction, long_), [])))
+            except ValueError:
+                continue
+            if a and b and self._unpark_continuation(a, b) is not None:
+                return short, long_
+        return None
+
+    def _unpark_pylon_from_bay(self):
+        """The pylon that decides the unpark sequence, judged from the bay pose
+        (as _unpark_variant at the plan). None if there is none."""
+        if self.unpark_plan_pose is None or not self.unpark_direction:
+            return None
+        saved = self.pose
+        self.pose = self.unpark_plan_pose
+        try:
+            _variant, pyl = self._unpark_variant(self.unpark_direction)
+        finally:
+            self.pose = saved
+        return pyl
+
     def _unpark_recheck(self):
         """After unparking: does the pylon ahead of the bay, whose colour is
         known by now, demand another sequence than the one driven? If the
@@ -3229,11 +3287,12 @@ class Round1Controller(Node):
         12 instead of 37 cm in move 3) -- pull that arc on and drive the rest.
         True = continuation started.
 
-        Only when the decision in the bay had NO colour: a colour that flips
-        later is the map arguing with itself, not a missed pylon."""
+        Also when the bay HAD a colour: from the bay the camera sees the
+        shaded side of the pylon, and that colour was wrong (cam_29: one red
+        vote on green #19 -> outer sequence, pylon knocked over). Out of the
+        bay it sees the lit side; that view wins. Once per run."""
         if (not self.unpark_recheck or self.unpark_redo_done
                 or self.unpark_mode != 'out' or self.unpark_plan_pose is None
-                or self.unpark_chosen_color is not None
                 or not self.unpark_steps_run or self.pose is None):
             return False
         saved = self.pose
@@ -3242,8 +3301,14 @@ class Round1Controller(Node):
             variant, pyl = self._unpark_variant(self.unpark_direction)
         finally:
             self.pose = saved
-        if pyl is None or pyl['color'] not in (OBST_RED, OBST_GREEN):
+        if pyl is None:
             return False
+        if pyl['color'] not in (OBST_RED, OBST_GREEN):
+            if not getattr(self, 'unpark_short_active', False):
+                return False
+            # still no colour after looking: like the planner, take it as green
+            pyl = dict(pyl, color=OBST_GREEN)
+            variant = 'inner' if self.unpark_direction == 'CCW' else 'outer'
         if variant == self.unpark_chosen_variant:
             return False
         self.unpark_redo_done = True
@@ -3264,9 +3329,11 @@ class Round1Controller(Node):
         rest, k = cont
         self.get_logger().warn(
             "Unparking: pylon #%d ahead of the bay is %s now -- the %s sequence was "
-            "chosen without its colour, it needs the %s one. Pulls the arc of move %d "
+            "chosen with %s, it needs the %s one. Pulls the arc of move %d "
             "on by %+.1f cm and drives the remaining %d move(s)."
-            % (pyl['id'], colour, self.unpark_chosen_variant, variant, k + 1,
+            % (pyl['id'], colour, self.unpark_chosen_variant,
+               {OBST_RED: 'red', OBST_GREEN: 'green'}.get(self.unpark_chosen_color, 'no colour'),
+               variant, k + 1,
                rest[0][1] if rest and k < len(self.unpark_steps_run) else 0.0,
                len(rest) - (1 if k < len(self.unpark_steps_run) else 0)))
         # the pose after the partial move is no move boundary of the needed
@@ -4140,6 +4207,16 @@ class Round1Controller(Node):
                         if self.unpark_scan_here else
                         'drive off at once, scan stop at the end of the straight'))
             hold = self.unpark_hold_s if self.unpark_scan_here else self.unpark_measure_s
+            if getattr(self, 'unpark_short_active', False) and not self.unpark_redo_done:
+                hold = max(hold, self.unpark_look_min_s)
+                if t >= hold and t < hold + self.unpark_colour_wait_s:
+                    pyl = self._unpark_pylon_from_bay()
+                    if pyl is not None and pyl['color'] not in (OBST_RED, OBST_GREEN):
+                        self.get_logger().info(
+                            "After the short sequence: pylon #%d ahead, colour still "
+                            "open -- looking (%.1f s)." % (pyl['id'], t - hold),
+                            throttle_duration_sec=0.5)
+                        return
             if t < hold:
                 self.get_logger().info("Hold after unparking, %.1f s to go."
                                        % (hold - t), throttle_duration_sec=0.5)
