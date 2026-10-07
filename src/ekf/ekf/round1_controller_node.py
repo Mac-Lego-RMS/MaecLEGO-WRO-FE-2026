@@ -417,16 +417,19 @@ class Round1Controller(Node):
         # corner): approach and drive them at most this fast. At 0.8 m/s one
         # control tick is 4 cm past T_A, and it needs ~0.5 m to stop
         # (sim_3/sim_4 corner 3). 0 = off.
-        'v_tight_turn':  ('v_tight_turn',  0.40,  float),
+        'v_tight_turn':  ('v_tight_turn',  0.45,  float),   # cam_3: corners had room -> 0.40 -> 0.45
         # Corner speed by radius: v_tight_turn at min_turn_radius, rising
         # linearly to v_turn at v_turn_full_r (cam_1: speed by how tight the
         # corner is).
-        'v_turn_full_r': ('v_turn_full_r', 0.50,  float),
+        'v_turn_full_r': ('v_turn_full_r', 0.45,  float),
         # Corner with a pylon that is passed tight (planned clearance below
         # tight_pylon_clr, e.g. CCW: inside before, red outside / green inside
         # right after the corner): at most this fast. 0 = off.
         'v_tight_pylon': ('v_tight_pylon', 0.30,  float),
-        'tight_pylon_clr': ('tight_pylon_clr', 0.20, float),
+        # cam_3: at 0.20 nearly every corner counted as tight (planned 8-16
+        # cm is normal) and crawled at 0.26-0.43 m/s; only corner 1 (red ->
+        # green, planned 8.5 cm) really was -> 0.10.
+        'tight_pylon_clr': ('tight_pylon_clr', 0.10, float),
         'accel_dist':    ('accel_dist',    0.2,   float),   # ramp v_turn->v_drive after a corner
         # Accelerate already in the END of the corner: from this much remaining
         # heading (deg, after the dead time) v rises from v_turn towards
@@ -465,6 +468,13 @@ class Round1Controller(Node):
         # of ~30 cm then moves it onto the closer line. CW: the line at
         # 0.305 left the car 1.2 cm out of the bay (only_parken_59).
         'park_start_clearance_cw':  ('park_start_clearance_cw',  0.02, float),
+        # Start the park moves this much further out than the parking line;
+        # the sideways compensation lengthens the arcs so the car ends at the
+        # same depth. cam_3: start 1 cm further forward and 0.6 cm closer to
+        # the wall than sim_1/sim_3 -> rear-left corner caught the tip of the
+        # front magenta bar in move 2 (the window is ~1 cm).
+        'park_start_extra_cw':      ('park_start_extra_cw',      0.015, float),
+        'park_start_extra_ccw':     ('park_start_extra_ccw',     0.0, float),
         'park_start_clearance_ccw': ('park_start_clearance_ccw', 0.02, float),
         # Deceleration for braking to v_finish before the last corner. With
         # finish_decel 0.8 it braked only ~0.5 m before the turn-in point and
@@ -1481,6 +1491,15 @@ class Round1Controller(Node):
                 "in the bay, correct the park moves, not the line."
                 % (d * 100, self.park_q, BAY_DEPTH, 0.5 * CAR_WIDTH, clear))
         if self.park_q is not None:
+            self.park_q_target = self.park_q          # depth target of the park moves
+            extra = (self.park_start_extra_cw if self.unpark_direction == 'CW'
+                     else self.park_start_extra_ccw)
+            if extra > 0.0:
+                self._park_shift(0.0, extra)
+                self.get_logger().info(
+                    "Park start %.1f cm further out (line %.3f m) for room to the magenta "
+                    "bars -- the arcs are lengthened for the same depth."
+                    % (extra * 100, self.park_q))
             self.park_pass_q = max(self.park_q, q_pass)
             if self.park_pass_q > self.park_q + 1e-3:
                 self.get_logger().info(
@@ -3117,6 +3136,13 @@ class Round1Controller(Node):
         px, py, _pth = self.park_start
         d = (px * tx + py * ty) - (x * tx + y * ty)
         lat_off = ((nx * x + ny * y) - dw) - self.park_q
+        # the sideways compensation aims at the depth line, not the (wider)
+        # start line -- park_start_extra
+        q_t = getattr(self, 'park_q_target', None)
+        if q_t is not None and self.park_q is not None:
+            self.park_lat_extra = self.park_q - q_t
+        else:
+            self.park_lat_extra = 0.0
         heading = wrap(theta - math.atan2(ty, tx))
         return d, lat_off, heading
 
@@ -3316,7 +3342,7 @@ class Round1Controller(Node):
                    '' if abs(d_heading) < 0.002 else
                    ', start pose shifted by %+.1f cm because of the heading' % (d_heading * 100),
                    self.approach_iter))
-            self.park_start_lat_off = lat_off
+            self.park_start_lat_off = lat_off + getattr(self, 'park_lat_extra', 0.0)
             self._park_start_sequence()
             return
         if abs(d_heading) >= 0.002:
