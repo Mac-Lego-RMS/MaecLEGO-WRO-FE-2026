@@ -583,6 +583,12 @@ class Round1Controller(Node):
         # Steepest swing back onto the parking line after the last obstacle
         # (metres lateral per metre along). Measured clean: ~1.0.
         'park_return_slope_max':    ('park_return_slope_max',    0.90, float),
+        # Swing onto the parking line after the last pylon of the finish
+        # straight: start as early as the car edge keeps this much to the
+        # pylon (the cosine ramp hardly moves at first), and only as long as
+        # park_return_slope_max needs (not obs_transition_pref 0.70). cam_28
+        # CCW: ~20 cm of room left behind the green. 0 = as before.
+        'finish_return_clear':      ('finish_return_clear',      0.08, float),
         # Approach to the start pose: this exactly it must match along the
         # line, this many straight correction moves are allowed, this long it
         # waits before remeasuring (the EKF should settle).
@@ -2353,11 +2359,17 @@ class Round1Controller(Node):
             if abs(q_last - q_park) < 0.01:
                 keep.append((s_until, q_park))
             elif s_back - last_s >= needed:
-                keep += [(last_s, q_last), (s_back, q_park), (s_until, q_park)]
+                s0, L = last_s, s_back - last_s
+                if obs_lane and self.finish_return_clear > 0.0:
+                    s0, L = self._finish_return_ramp(
+                        max(obs_lane, key=lambda t: t[0]), q_last, q_park, needed,
+                        last_s, s_stop - 0.05)
+                    keep = [(sv, qv) for (sv, qv) in pts if sv <= s0 + 1e-6] or [pts[0]]
+                keep += [(s0, q_last), (s0 + L, q_park), (s_until, q_park)]
                 self.get_logger().info(
                     "Finish straight: after the last obstacle back onto the "
-                    "parking line (q %.2f -> %.2f over %.2f m)."
-                    % (q_last, q_park, s_back - last_s))
+                    "parking line (q %.2f -> %.2f over %.2f m, from %.2f m after the pylon)."
+                    % (q_last, q_park, L, s0 - (max(t[0] for t in obs_lane) if obs_lane else s0)))
             elif s_over is not None:
                 keep += [(last_s, q_last), (s_over, q_park),
                          (s_over + 0.30, q_park)]
@@ -2404,6 +2416,33 @@ class Round1Controller(Node):
             self.plan_arc(self.pose[2], o_in_override=self.obs_path_end_q)
         elif self._ramp_cap_radius() is not None:
             self.plan_arc(self.pose[2], o_in_override=arc_o_in)
+
+    def _finish_return_ramp(self, last_obs, q_last, q_park, needed, s_default, s_limit):
+        """Earliest start and length of the swing onto the parking line that
+        keeps finish_return_clear between car edge and the last pylon.
+        Returns (s0, L); (s_default, max(needed, obs_transition_pref)) if
+        nothing better fits."""
+        s_o, q_o = last_obs[0], last_obs[1]
+        L = max(needed, self.obs_transition_min)
+        lo, hi = s_o - (CAR_NOSE + BLOCK_HALF), s_o - CAR_REAR + BLOCK_HALF   # car beside the pylon
+        best = None
+        for k in range(16):                       # start 0.15 m before .. at the pylon
+            s0 = s_o - 0.15 + 0.01 * k
+            ok = True
+            n = 24
+            for i in range(n + 1):
+                sv = lo + (hi - lo) * i / n
+                f = min(max((sv - s0) / L, 0.0), 1.0)
+                q = q_last + (q_park - q_last) * 0.5 * (1.0 - math.cos(math.pi * f))
+                if abs(q - q_o) - 0.5 * CAR_WIDTH - BLOCK_HALF < self.finish_return_clear:
+                    ok = False
+                    break
+            if ok:
+                best = s0
+                break
+        if best is None or best >= s_default or best + L > s_limit:
+            return s_default, max(self.obs_transition_pref, needed)
+        return best, L
 
     def _return_path(self):
         """After the corner without an obstacle path: a gentle path from the
