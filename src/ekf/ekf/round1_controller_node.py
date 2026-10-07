@@ -193,6 +193,16 @@ class Round1Controller(Node):
         # Arc at the actual pose: at most this close to the outer wall may it
         # come onto the next straight when the smallest radius is needed.
         'turn_anchor_min_out': ('turn_anchor_min_out', 0.20, float),
+        # ... but never above the PLANNED exit minus this: a pylon at the
+        # corner exit on the outer side gives o_out 0.19, then 1 cm of push
+        # already failed the check (sim_3 corner 3: two emergency manoeuvres).
+        'turn_anchor_out_tol': ('turn_anchor_out_tol', 0.03, float),
+        'turn_anchor_out_floor': ('turn_anchor_out_floor', 0.14, float),
+        # Clearance car edge -> corner of the INNER band over the arc. On the
+        # inner line (o_in = o_out = 0.81) the 0.50 m arc passed the inner
+        # corner with 0.7 cm in theory, 2 cm measured (sim_3 corners 6/10):
+        # smaller radius until this is kept. 0 = off.
+        'inner_corner_clearance': ('inner_corner_clearance', 0.04, float),
         # Pylons at the corner entry/exit: check the arc against the car
         # outline and choose the radius so that at least this clearance
         # remains (parken_test_20: R 0.50 left 3 mm to the red pylon at the
@@ -281,6 +291,15 @@ class Round1Controller(Node):
         'scan_pause':       ('scan_pause',       1.0, lambda v: bool(float(v))),
         'scan_pause_s':     ('scan_pause_s',     1.5, float),   # how long to stand still [s]
         'scan_front_dist':  ('scan_front_dist',  1.10, float),  # ALWAYS stop this far from the front wall (pose)
+        # Closer to the corner when the corner allows it: hold at
+        # max(scan_front_dist_min, o_out + min_turn_radius + margin), at most
+        # scan_front_dist. At 1.10 m the LiDAR stands exactly at the face of
+        # the inner band -- the far pylons of the next straight are grazed
+        # (sim_3 hold 3: exit pylon 0.5 points per scan). Only if the next
+        # straight already has a pylon with colour (o_out is then known);
+        # otherwise the hold decides o_out and keeps 1.10. 0 = always 1.10.
+        'scan_front_dist_min': ('scan_front_dist_min', 0.95, float),
+        'scan_hold_turn_margin': ('scan_hold_turn_margin', 0.05, float),
         # It still rolls this far after the halt command (measured ~13 cm).
         # The halt is triggered this much earlier, otherwise it stands right
         # at the turn-in point and only accelerates in the corner.
@@ -4082,7 +4101,7 @@ class Round1Controller(Node):
         self.manoeuvre_attempts += 1
         self.publish_stop()
         self.get_logger().warn(
-            "EMERGENCY MANOEUVRE %d/%d: %s -- backs up %.0f cm (steering %+.0f %%, "
+            "EMERGENCY MANOEUVRE %d/%d: %s -- brakes, then backs up %.0f cm (steering %+.0f %%, "
             "heading %+.0f deg to the straight), then replan."
             % (self.manoeuvre_attempts, self.manoeuvre_max, reason, dist * 100, steer,
                math.degrees(err) if self.arc is not None else 0.0))
@@ -4092,9 +4111,26 @@ class Round1Controller(Node):
         self.unpark_steps_before_manoeuvre = (list(self.unpark_steps_run)
                                               if self.unpark_steps_run is not None else None)
         self.unpark_pos_prev = None
+        # Brake FIRST with the normal speed control. The unpark control
+        # parameters limit the duty (maxduty 140): set at 0.8 m/s it could
+        # hardly brake and rolled on 48 cm into the front wall (sim_3, corner
+        # 3). The distance rolled while braking is added to the way back.
+        self.manoeuvre_pending = (steer, command, x, y, th, self.now_s())
+        self.state = 'MANOEUVRE_BRAKE'
+        return True
+
+    def _manoeuvre_brake(self, x, y, theta):
+        self.publish_stop()
+        steer, command, x0, y0, th0, t0 = self.manoeuvre_pending
+        if abs(self.v_act) > 0.03 and self.now_s() - t0 < 1.5:
+            return
+        rolled = max(0.0, (x - x0) * math.cos(th0) + (y - y0) * math.sin(th0))
+        command -= min(rolled, 0.40) / max(self.park_move_scale, 0.5)
+        self.get_logger().info(
+            "Manoeuvre: stands after %.2f s, rolled %.0f cm -- backs up %.0f cm."
+            % (self.now_s() - t0, rolled * 100, -command * max(self.park_move_scale, 0.5) * 100))
         self._unpark_pid(self.unpark_pid)
         self._park_start_moves([(steer_to_wire(steer), command * 100.0)], 'manoeuvre')
-        return True
 
     def _manoeuvre_done(self, x, y, theta):
         self.unpark_steps_run = self.unpark_steps_before_manoeuvre
@@ -4178,6 +4214,24 @@ class Round1Controller(Node):
         self.v_cmd = 0.0
         self.last_cmd = (0.0, 0.0)
 
+    def _scan_hold_front(self):
+        """Distance rear axle -> front wall for the scan hold of this corner."""
+        fd = self.scan_front_dist
+        if self.scan_front_dist_min <= 0.0 or self.scan_front_dist_min >= fd:
+            return fd
+        if not self.obstacles or self.corners is None:
+            return fd
+        w = self._exit_wall_idx(self.corner_idx)
+        if not any(o['wall'] == w and o['color'] in (OBST_RED, OBST_GREEN)
+                   for o in self.obstacles):
+            return fd
+        try:
+            o_out = self.corner_o_out(self.corner_idx)
+        except Exception:
+            return fd
+        need = o_out + self.min_turn_radius + self.scan_hold_turn_margin
+        return max(self.scan_front_dist_min, min(fd, need))
+
     def _lookahead_needed(self, corner, tr):
         """Is the look-ahead halt on the current straight worth it?
         Returns (needed, reason)."""
@@ -4216,7 +4270,7 @@ class Round1Controller(Node):
         v0 = self.v_finish_min
         coast = (v0 * self.scan_coast_t + v0 * v0 / (2.0 * max(self.scan_brake_decel, 0.1))
                  if self.scan_brake_decel > 0.0 else self.scan_coast)
-        target = self.scan_front_dist
+        target = self._scan_hold_front()
         if (not self.lookahead_halt_done_this_straight and self.scan_lookahead_halt_front > 0.0
                 and self._lookahead_needed(corner, tr)[0]):
             target = max(target, self.scan_lookahead_halt_front)
@@ -4454,6 +4508,7 @@ class Round1Controller(Node):
                     f"-> {R:.2f} m reduced to make the turn-in point reachable.")
 
         R = self._radius_for_pylons(idx, A, B, o_in, o_out, R, theta)
+        R = self._radius_for_inner_corner(idx, A, B, o_in, o_out, R, theta)
 
         LA = (A[0], A[1], A[2] + o_in)
         LB = (B[0], B[1], B[2] + o_out)
@@ -4615,6 +4670,67 @@ class Round1Controller(Node):
         lat_err = abs((A[0] * px + A[1] * py) - LA[2])
         return room > 0.01 and lat_err / room <= self.max_settle_slope
 
+    def _inner_corner_point(self, idx, A, B):
+        """Corner of the inner band at corner idx: entry and exit line at the
+        full lane width."""
+        def width(w):
+            return (self.lane_width[w] if self.lane_width is not None
+                    and w < len(self.lane_width) else 1.0)
+        LA = (A[0], A[1], A[2] + width(self._entry_wall_idx(idx)))
+        LB = (B[0], B[1], B[2] + width(self._exit_wall_idx(idx)))
+        return line_intersect(LA, LB)
+
+    def _radius_for_inner_corner(self, idx, A, B, o_in, o_out, R, theta):
+        """Largest radius <= R whose arc keeps inner_corner_clearance to the
+        corner of the inner band, without getting closer to a pylon than
+        before. On the inner line a smaller radius stays further from it."""
+        if self.inner_corner_clearance <= 0.0:
+            return R
+        K = self._inner_corner_point(idx, A, B)
+        if K is None:
+            return R
+
+        def clr(r):
+            poses, _c = self._arc_poses(A, B, o_in, o_out, r, theta)
+            if poses is None:
+                return None
+            return min(self._outline_dist(p, K[0], K[1]) for p in poses)
+
+        c0 = clr(R)
+        if c0 is None or c0 >= self.inner_corner_clearance:
+            return R
+        _p, C = self._arc_poses(A, B, o_in, o_out, R, theta)
+        pylons = [o for o in (self.obstacles or [])
+                  if math.hypot(o['x'] - C[0], o['y'] - C[1]) < R + 0.6]
+
+        def pyl(r):
+            if not pylons:
+                return float('inf')
+            v, _w = self._arc_pylon_clearance_for(A, B, o_in, o_out, r, theta, pylons)
+            return float('inf') if v is None else v
+
+        p_need = min(self.arc_pylon_clearance, pyl(R)) - 1e-3
+        best = None
+        r = R - 0.025
+        while r >= self.min_turn_radius - 1e-6:
+            c = clr(r)
+            if c is not None and pyl(r) >= p_need:
+                if c >= self.inner_corner_clearance:
+                    best = (r, c)
+                    break
+                if best is None or c > best[1]:
+                    best = (r, c)
+            r -= 0.025
+        if best is None or best[1] <= c0:
+            self.get_logger().warn(
+                f"Corner {self.corner_count + 1}: only {c0*100:.1f} cm to the corner of "
+                f"the inner band with R={R:.2f} m, no smaller radius helps.")
+            return R
+        self.get_logger().warn(
+            f"Corner {self.corner_count + 1}: inner band corner -- radius {R:.2f} -> "
+            f"{best[0]:.2f} m, clearance {c0*100:.1f} -> {best[1]*100:.1f} cm.")
+        return best[0]
+
     def _radius_for_pylons(self, idx, A, B, o_in, o_out, R, theta):
         """Choose the radius so that the arc passes pylons at the corner
         entry and exit with arc_pylon_clearance.
@@ -4702,11 +4818,14 @@ class Round1Controller(Node):
         push_out = 0.0
         if R < self.min_turn_radius:
             push_out = (self.min_turn_radius - R) * denom
-            if o_out is not None and o_out - push_out < self.turn_anchor_min_out:
+            min_out = self.turn_anchor_min_out
+            if o_out is not None:
+                min_out = max(self.turn_anchor_out_floor,
+                              min(min_out, o_out - self.turn_anchor_out_tol))
+            if o_out is not None and o_out - push_out < min_out:
                 return False, ("even with radius %.2f m it would come out %.2f m from "
                                "the outer wall (minimum %.2f)"
-                               % (self.min_turn_radius, o_out - push_out,
-                                  self.turn_anchor_min_out))
+                               % (self.min_turn_radius, o_out - push_out, min_out))
             R = self.min_turn_radius
         C = (x + R * s * nlx, y + R * s * nly)
         lb_new = lb - push_out
@@ -4751,6 +4870,9 @@ class Round1Controller(Node):
         # the unpark moves run on the ESP and need no fresh pose.
         if self.state.startswith('UNPARK'):
             self._unpark_step(x, y, theta)
+            return
+        if self.state == 'MANOEUVRE_BRAKE':
+            self._manoeuvre_brake(x, y, theta)
             return
         if self.state == 'PARK_HOLD':
             self._park_hold(x, y, theta)
@@ -5156,7 +5278,7 @@ class Round1Controller(Node):
             if needed:
                 # Only if there is still room for the scan hold afterwards -- if
                 # it already comes out of the corner closer, the look-ahead halt is dropped.
-                if front_dist - coast >= self.scan_front_dist + 0.25:
+                if front_dist - coast >= self._scan_hold_front() + 0.25:
                     self.scan_hold_duration = self.scan_lookahead_halt_s
                     self.scan_pause_t0 = self.now_s()
                     self.state = 'SCAN_PAUSE'
@@ -5167,7 +5289,8 @@ class Round1Controller(Node):
                         f"(target {self.scan_lookahead_halt_front:.2f}, coast "
                         f"{coast*100:.0f} cm) -- look at the last pylon of the straight at standstill.")
                     return
-            if front_dist <= self.scan_front_dist + coast:
+            hold_front = self._scan_hold_front()
+            if front_dist <= hold_front + coast:
                 self.scan_done_this_straight = True
                 self.lookahead_halt_done_this_straight = True
                 self.scan_hold_duration = self.scan_pause_s
@@ -5177,7 +5300,7 @@ class Round1Controller(Node):
                 self.get_logger().info(
                     f"SCAN HOLD start (lap {self.corner_count // 4 + 1}): "
                     f"{self.scan_pause_s:.1f}s, front wall {front_dist:.2f} m "
-                    f"(target {self.scan_front_dist:.2f}, coast {coast*100:.0f} cm "
+                    f"(target {hold_front:.2f}, coast {coast*100:.0f} cm "
                     f"at {abs(self.v_act):.2f} m/s), to_TA {to_TA:+.2f} m.")
                 return
 
