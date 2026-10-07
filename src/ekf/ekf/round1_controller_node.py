@@ -499,7 +499,10 @@ class Round1Controller(Node):
         # sideways compensation (CCW gets ~4-5 cm from it anyway, because it
         # reaches the start pose on the pass line: parked 7-8 cm from the
         # wall; CW reaches the line exactly and stood at 13.6-14.7 cm).
-        'park_depth_extra_cw':      ('park_depth_extra_cw',      0.03, float),
+        # cam_7-10: 0.03 -> 3.8-4.1 cm correction -> parked 5.8-6.7 cm from the
+        # wall (touching). Measured: 1 cm correction = ~1.56 cm depth, 0 cm ->
+        # ~12.5 cm. 0.01 -> ~1.9 cm correction -> ~9.5 cm.
+        'park_depth_extra_cw':      ('park_depth_extra_cw',      0.01, float),
         'park_depth_extra_ccw':     ('park_depth_extra_ccw',     0.0, float),
         'park_start_clearance_ccw': ('park_start_clearance_ccw', 0.02, float),
         # Deceleration for braking to v_finish before the last corner. With
