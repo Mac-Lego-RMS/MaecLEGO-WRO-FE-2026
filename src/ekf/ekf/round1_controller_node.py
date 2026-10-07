@@ -432,6 +432,20 @@ class Round1Controller(Node):
         # m/s, rolled 31 cm, stood at 1.4 m instead of 1.85 m -- the green
         # then needed a steep late dodge (1.2-1.8). 0 = off.
         'v_lookahead_exit': ('v_lookahead_exit', 0.30, float),
+        # Obstacle straights: v_obstacle only in zones around the pylons and
+        # the lane changes, v_drive in between (cam_6: straights 1 and 2 with
+        # pylons only at the start and the end ran at 0.55 all the way).
+        # Zone: zone_before before a pylon / lane change, zone_after behind
+        # it; braking into a zone with obs_zone_decel. 0 = whole straight capped.
+        'obs_zone_speed':   ('obs_zone_speed',   1.0, lambda v: bool(float(v))),
+        'obs_zone_before':  ('obs_zone_before',  0.30, float),
+        'obs_zone_after':   ('obs_zone_after',   0.10, float),
+        'obs_zone_decel':   ('obs_zone_decel',   0.50, float),
+        # Wide corners (R >= v_turn_full_r, no pylon closer than
+        # wide_turn_clr planned): this fast (cam_6: corner between straight 2
+        # and 3 had room). 0 = v_turn.
+        'v_turn_wide':      ('v_turn_wide',      0.65, float),
+        'wide_turn_clr':    ('wide_turn_clr',    0.15, float),
         # cam_3: at 0.20 nearly every corner counted as tight (planned 8-16
         # cm is normal) and crawled at 0.26-0.43 m/s; only corner 1 (red ->
         # green, planned 8.5 cm) really was -> 0.10.
@@ -5551,6 +5565,11 @@ class Round1Controller(Node):
             clr = a.get('_clr')
             if clr is not None and clr < self.tight_pylon_clr:
                 v = min(v, self.v_tight_pylon)
+            elif (self.v_turn_wide > self.v_turn and v >= self.v_turn - 1e-6
+                  and a.get('R', 0.0) >= self.v_turn_full_r - 1e-6
+                  and (clr is None or clr >= self.wide_turn_clr)
+                  and not self._lookahead_after_corner()):
+                v = self.v_turn_wide
         return v
 
     def _drive(self, x, y, theta):
@@ -5857,8 +5876,62 @@ class Round1Controller(Node):
             v_cap = (self.v_obstacle_steep
                      if self.obs_max_slope >= self.obs_slope_slow
                      else self.v_obstacle)
+            if self.obs_zone_speed:
+                v_cap = self._obs_zone_cap(x, y, v_cap)
             v = min(v, v_cap)
         self.publish_cmd(v, omega)
+
+    def _obs_zones(self):
+        """Slow zones of the current obstacle path as (lo, hi) in distance to
+        the front wall: around each pylon of the straight and each lane change."""
+        key = (id(self.obs_path), id(self.arc), len(self.obstacles or []))
+        if getattr(self, '_obs_zones_key', None) == key:
+            return self._obs_zones_cache
+        zones = []
+        tr = self.arc['travel']
+        c = self.corners[self.corner_idx]
+        fd = lambda px, py: (c[0] - px) * tr[0] + (c[1] - py) * tr[1]
+        w = self._entry_wall_idx(self.corner_idx)
+        for o in (self.obstacles or []):
+            if o['wall'] == w:
+                f = fd(o['x'], o['y'])
+                zones.append((f - self.obs_zone_after, f + self.obs_zone_before))
+        LA = self.arc['LA']
+        pts = self.obs_path
+        q = [LA[0] * px + LA[1] * py - LA[2] for (px, py) in pts]
+        k = 0
+        while k < len(pts) - 1:
+            if abs(q[k + 1] - q[k]) > 0.002:
+                j = k
+                while j < len(pts) - 1 and abs(q[j + 1] - q[j]) > 0.002:
+                    j += 1
+                f0, f1 = fd(*pts[k]), fd(*pts[j])
+                zones.append((min(f0, f1) - self.obs_zone_after,
+                              max(f0, f1) + self.obs_zone_before))
+                k = j
+            k += 1
+        self._obs_zones_key = key
+        self._obs_zones_cache = zones
+        return zones
+
+    def _obs_zone_cap(self, x, y, v_zone):
+        """v_zone inside a slow zone, v_drive between them (with a braking
+        ramp into the next zone ahead)."""
+        try:
+            zones = self._obs_zones()
+        except Exception:
+            return v_zone
+        tr = self.arc['travel']
+        c = self.corners[self.corner_idx]
+        f = (c[0] - x) * tr[0] + (c[1] - y) * tr[1]
+        if any(lo <= f <= hi for lo, hi in zones):
+            return v_zone
+        ahead = [f - hi for lo, hi in zones if hi < f]      # zones still ahead
+        if not ahead:
+            return max(v_zone, self.v_drive)
+        d = max(min(ahead) - max(self.v_act, 0.0) * self.steer_dead_time, 0.0)
+        return max(v_zone, min(self.v_drive,
+                               math.sqrt(v_zone ** 2 + 2.0 * self.obs_zone_decel * d)))
 
     def _turn(self, x, y, theta):
         C = self.arc['C']; s = self.arc['s']; R = self.arc['R']
