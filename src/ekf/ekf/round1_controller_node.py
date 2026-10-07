@@ -688,7 +688,12 @@ class Round1Controller(Node):
         # close to the wall in the first two moves -> start 1.5 cm further back.
         'park_offset_long_ccw':     ('park_offset_long_ccw',     -0.015, float),
         'park_offset_lat_ccw':      ('park_offset_lat_ccw',      -0.04, float),
-        'park_offset_long_cw':      ('park_offset_long_cw',      -0.025, float),
+        # Only used when the front magenta wall is NOT seen (otherwise the
+        # face sets the start along). With a seen face the start came out
+        # +1.5..+2.6 cm ahead of the map start with -0.025 (cam_3-10); in
+        # cam_13 the face window passed during the last corner (4 scans), the
+        # map start with -0.025 applied -> ~2.2 cm too far back. -> -0.003.
+        'park_offset_long_cw':      ('park_offset_long_cw',      -0.003, float),
         'park_offset_lat_cw':       ('park_offset_lat_cw',       0.01, float),
         # --- /localization_state -------------------------------------------
         # With 'recovering'/'lost' at most this fast (curvature stays the same).
