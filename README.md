@@ -42,11 +42,6 @@ All six sides are in [`v-photos/`](v-photos).
 Clemens (mechanical design), Jannik (electronics and main PCB) and Finn
 (software). More in [`t-photos/`](t-photos).
 
-| Driving video | |
-|---|---|
-| Open challenge | [LINK_FOLLOWS](LINK_FOLLOWS) |
-| Obstacle challenge | [LINK_FOLLOWS](LINK_FOLLOWS) |
-
 ## Engineering journal
 
 The journal is written in Markdown in [`docs/journal/`](docs/journal) — one
