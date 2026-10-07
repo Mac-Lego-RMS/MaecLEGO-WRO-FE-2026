@@ -4802,8 +4802,13 @@ class Round1Controller(Node):
         A = self._inward(self.walls[self._entry_wall_idx(idx)], cx, cy)
         B = self._inward(self.walls[self._exit_wall_idx(idx)], cx, cy)
         corner = self.corners[idx]
-        pylons = [o for o in self.obstacles
-                  if math.hypot(o['x'] - corner[0], o['y'] - corner[1]) < 1.3]
+        # only pylons AFTER the corner (exit straight): the last one before it
+        # is the pylon that sets the entry line in the first place. sim_17:
+        # with it included the line went 0.81 -> 0.86-0.89 towards the inner
+        # band (5 cm to it) and the inner corner kept only 2.4 cm.
+        w_exit = self._exit_wall_idx(idx)
+        pylons = [o for o in self.obstacles if o['wall'] == w_exit
+                  and math.hypot(o['x'] - corner[0], o['y'] - corner[1]) < 1.3]
         if not pylons:
             return None
         try:
@@ -4826,7 +4831,7 @@ class Round1Controller(Node):
                 if poses is None:
                     continue
                 if K is not None and min(self._outline_dist(p, K[0], K[1])
-                                         for p in poses) < 0.03:
+                                         for p in poses) < self.inner_corner_clearance:
                     continue
                 c = min(self._outline_dist(p, o['x'], o['y']) - BLOCK_HALF
                         for o in pylons for p in poses)
@@ -4839,8 +4844,12 @@ class Round1Controller(Node):
             return None
         w = self.lane_width[self._entry_wall_idx(idx)]
         lo, hi = self.obs_wall_margin, w - self.obs_wall_margin
-        cands = sorted({round(o_in0 + 0.05 * k, 3) for k in range(-12, 13)
-                        if lo <= o_in0 + 0.05 * k <= hi and k != 0},
+        # only AWAY from the inner band (smaller q): towards it there is
+        # neither room on the straight nor at the inner corner
+        # and at most 15 cm: a big swing across the lane just for the corner
+        # is worse than a few cm less clearance
+        cands = sorted({round(o_in0 - 0.05 * k, 3) for k in range(1, 4)
+                        if lo <= o_in0 - 0.05 * k <= hi},
                        key=lambda q: abs(q - o_in0))
         top = (c0, None)
         for q in cands:
