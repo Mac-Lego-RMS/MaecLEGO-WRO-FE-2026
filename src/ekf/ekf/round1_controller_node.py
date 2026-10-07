@@ -503,7 +503,12 @@ class Round1Controller(Node):
         # wall (touching). Measured: 1 cm correction = ~1.56 cm depth, 0 cm ->
         # ~12.5 cm. 0.01 -> ~1.9 cm correction -> ~9.5 cm.
         'park_depth_extra_cw':      ('park_depth_extra_cw',      0.01, float),
-        'park_depth_extra_ccw':     ('park_depth_extra_ccw',     0.0, float),
+        # CCW reaches the start pose on the pass line, 4-5 cm out; fully
+        # compensated it parked 6.1-8.3 cm from the wall (cam_1/2/15) and the
+        # lengthened forward move 4 hit the front magenta wall (cam_15).
+        # Without compensation it was 10-13.6 cm (sim_11-14). -> only ~2.3 cm
+        # of the 4.8 compensated: aim for ~9.5 cm, move 4 only ~1 cm longer.
+        'park_depth_extra_ccw':     ('park_depth_extra_ccw',     -0.025, float),
         'park_start_clearance_ccw': ('park_start_clearance_ccw', 0.02, float),
         # Deceleration for braking to v_finish before the last corner. With
         # finish_decel 0.8 it braked only ~0.5 m before the turn-in point and
@@ -1205,22 +1210,22 @@ class Round1Controller(Node):
                 "-p unpark:=true <<<")
 
         # Status LEDs green = controller is running (start_robot.sh set red
-        # at boot and yellow once the stack was up). Only sent once the
-        # bridge's subscription is matched: a message published before
-        # discovery has finished is simply lost, and the LEDs would stay
-        # yellow although the robot is about to drive.
+        # at boot and yellow once the stack was up). Repeated every second
+        # until the run starts, NOT sent once: get_subscription_count()
+        # also counts other subscribers (bag recorder), and a single message
+        # sent before the bridge had matched was lost -- the LEDs stayed
+        # yellow (07.10.2026: with a second subscriber only 6 of 30 arrived).
+        # Resending the same solid colour does not flicker, the ESP keeps
+        # the base phase when mode and period stay the same.
         self.pub_pixel = self.create_publisher(String, '/esp_serial_bridge/pixel', 10)
         self.led_phase = 'ready'      # ready (green) -> run (white) -> finished (rainbow)
-        self._pixel_timer = self.create_timer(0.2, self._pixel_running)
+        self._pixel_timer = self.create_timer(1.0, self._pixel_running)
 
     def _pixel_running(self):
         if self.led_phase != 'ready':
             self._pixel_timer.cancel()      # run already started -- no green over white
             return
-        if self.pub_pixel.get_subscription_count() == 0:
-            return
         self.pub_pixel.publish(String(data='green'))
-        self._pixel_timer.cancel()
 
     def _pixel(self, phase, text):
         """Status LEDs once per phase: white while the run is going, rainbow
