@@ -206,7 +206,10 @@ class Round1Controller(Node):
         # smaller radius until this is kept. 0 = off.
         # sim_18: planned 4.7 cm, driven 1.5-1.8 cm (the arc runs up to 8 cm
         # inside the circle, as at the pylons) -> 0.08.
-        'inner_corner_clearance': ('inner_corner_clearance', 0.08, float),
+        # sim_19: planned 8.8 cm, driven ~5 cm -> 0.11
+        'inner_corner_clearance': ('inner_corner_clearance', 0.11, float),
+        # inner-side pass offset this much towards the pylon (obstacle_path.INNER_PASS_BIAS)
+        'obs_inner_bias':     ('obs_inner_bias',     0.05, float),
         # T_A at least this far AFTER the last lane change of the obstacle path
         # (the car must be straight again before turning in). sim_18 corners
         # 6/10: change 0.19 -> 0.71 ended at T_A, it came in 34 deg turned and
@@ -1671,6 +1674,7 @@ class Round1Controller(Node):
         from ekf.obstacle_path import ObstaclePathPlanner
         w = self.lane_width[wall_idx]
         return ObstaclePathPlanner(lane_width=w, wall_margin=self.obs_wall_margin,
+                                   inner_bias=self.obs_inner_bias,
                                    outer_margin=self._outer_margin(wall_idx))
 
     def _outer_margin(self, wall_idx):
@@ -2390,6 +2394,7 @@ class Round1Controller(Node):
         # 0.20 on the inside -- the wrong side; at red (CCW outer) it drove
         # centred between wall and pylon, passing the bay by 1-4 cm.
         return ObstaclePathPlanner(
+            inner_bias=self.obs_inner_bias,
             outer_margin=self._outer_margin(w_idx),
             lane_width=w,
             clear_before=self.obs_clear_before,

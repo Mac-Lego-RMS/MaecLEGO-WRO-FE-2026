@@ -25,6 +25,11 @@ ROBOT_HALF = 0.06           # 120 mm / 2
 SMALL_SHIFT_IGNORE = 0.03   # don't drive offsets this small at all (safety margin)
 SMALL_SHIFT = 0.08          # don't squeeze offsets this small into too short ramps
 PASS_KEEP_CLEAR = 0.08      # this much clearance (edge to edge) is enough to keep the lane
+# Passing on the INNER side: not midway, this much towards the pylon (never
+# closer than PASS_KEEP_CLEAR to it). The corners after it run up to 8 cm
+# further inside -- midway (0.81) the car came to 5 cm from the inner band
+# (sim_19); at 0.76 it keeps 8 cm to the pylon and ~17 cm to the band.
+INNER_PASS_BIAS = 0.05
 SMALL_SHIFT_SLOPE = 0.20    # ... but at most this steep on average, at least
                             # transition_min long (the cosine ramp is pi/2 times
                             # steeper in the middle than on average)
@@ -35,7 +40,7 @@ COLOR_UNKNOWN, COLOR_RED, COLOR_GREEN = 0, 1, 2
 class ObstaclePathPlanner:
     def __init__(self, lane_width=1.00, clear_before=0.20, clear_after=0.20,
                  transition_pref=0.60, transition_min=0.40, wall_margin=0.12,
-                 anchor_early=True, outer_margin=0.0):
+                 anchor_early=True, outer_margin=0.0, inner_bias=INNER_PASS_BIAS):
         """
         lane_width      : outer wall -> inner wall [m]
         clear_before    : be ON the new offset this far BEFORE the obstacle [m]
@@ -54,6 +59,7 @@ class ObstaclePathPlanner:
         # obstacle at the outer wall (the magenta walls of the parking bay reach
         # this far into the field): pass on the outside midway between IT and the pylon
         self.outer_margin = outer_margin
+        self.inner_bias = inner_bias
 
     # ---------------------------------------------------------------- offsets
     def pass_offset(self, obstacle_q, color, ccw):
@@ -76,6 +82,8 @@ class ObstaclePathPlanner:
         else:
             near, far = obstacle_q + BLOCK_HALF, self.lane_width
         q = 0.5 * (near + far)
+        if not pass_outer and self.inner_bias > 0.0:
+            q = max(q - self.inner_bias, near + ROBOT_HALF + PASS_KEEP_CLEAR)
         return min(max(q, self.wall_margin), self.lane_width - self.wall_margin)
 
     def _gets_past(self, q, obstacle_q, color, ccw):
