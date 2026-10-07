@@ -631,6 +631,16 @@ class Round1Controller(Node):
         # the wrong side again). 0 = off.
         'scan_lookahead_halt_front': ('scan_lookahead_halt_front', 1.85, float),
         'scan_lookahead_halt_s':    ('scan_lookahead_halt_s',    1.2, float),
+        # Look-ahead halt only where a pylon can still hide: nothing known on
+        # the straight yet, a pylon without colour, or the first pylon at the
+        # ENTRY with no second one known (rules: at most 2 per straight, a
+        # second one then stands further on). If the first pylon stands in
+        # the middle or at the end, there is nothing behind it -- no halt.
+        # 0 = always halt (as before).
+        'scan_lookahead_smart':     ('scan_lookahead_smart',     1.0, lambda v: bool(float(v))),
+        # a pylon at least this far from the front wall counts as ENTRY row
+        # (rows: entry ~2.0 m, middle ~1.5 m, end ~1.0 m)
+        'scan_lookahead_entry_front': ('scan_lookahead_entry_front', 1.75, float),
         # EMERGENCY MANOEUVRING instead of an emergency halt: if the arc past
         # T_A can no longer be driven or something stands right in front of
         # the nose, it backs up and replans. manoeuvre_trigger_dist: this
@@ -4168,6 +4178,28 @@ class Round1Controller(Node):
         self.v_cmd = 0.0
         self.last_cmd = (0.0, 0.0)
 
+    def _lookahead_needed(self, corner, tr):
+        """Is the look-ahead halt on the current straight worth it?
+        Returns (needed, reason)."""
+        if not self.scan_lookahead_smart:
+            return True, 'always (scan_lookahead_smart off)'
+        if self.obstacles is None:
+            return True, 'no obstacle map yet'
+        w = self._entry_wall_idx(self.corner_idx)
+        mine = [o for o in self.obstacles if o['wall'] == w]
+        if not mine:
+            return True, 'no pylon known on this straight yet (rules: at least one)'
+        if any(o['color'] not in (OBST_RED, OBST_GREEN) for o in mine):
+            return True, 'pylon without colour on this straight'
+        front = [(corner[0] - o['x']) * tr[0] + (corner[1] - o['y']) * tr[1] for o in mine]
+        if max(front) < self.scan_lookahead_entry_front:
+            return False, (f'first pylon {max(front):.2f} m from the front wall (middle/end) '
+                           f'-- nothing can stand behind it')
+        if len(mine) >= 2:
+            return False, 'both pylons of the straight known with colour'
+        return True, (f'pylon at the entry ({max(front):.2f} m from the front wall) '
+                      f'-- a second one may stand further on')
+
     def _scan_brake_cap(self):
         """Speed limit before the scan hold: v = sqrt(2 a rest), rest up to
         the trigger point (target + coast at arrival speed v_finish_min)."""
@@ -4185,7 +4217,8 @@ class Round1Controller(Node):
         coast = (v0 * self.scan_coast_t + v0 * v0 / (2.0 * max(self.scan_brake_decel, 0.1))
                  if self.scan_brake_decel > 0.0 else self.scan_coast)
         target = self.scan_front_dist
-        if not self.lookahead_halt_done_this_straight and self.scan_lookahead_halt_front > 0.0:
+        if (not self.lookahead_halt_done_this_straight and self.scan_lookahead_halt_front > 0.0
+                and self._lookahead_needed(corner, tr)[0]):
             target = max(target, self.scan_lookahead_halt_front)
         rest = front_dist - target - coast
         return max(self.v_finish_min,
@@ -5114,6 +5147,13 @@ class Round1Controller(Node):
             if (not self.lookahead_halt_done_this_straight and self.scan_lookahead_halt_front > 0.0
                     and front_dist <= self.scan_lookahead_halt_front + coast):
                 self.lookahead_halt_done_this_straight = True
+                needed, why = self._lookahead_needed(corner, tr)
+                if not needed:
+                    self.get_logger().info(
+                        f"LOOK-AHEAD HALT skipped (front wall {front_dist:.2f} m): {why}.")
+            else:
+                needed = False
+            if needed:
                 # Only if there is still room for the scan hold afterwards -- if
                 # it already comes out of the corner closer, the look-ahead halt is dropped.
                 if front_dist - coast >= self.scan_front_dist + 0.25:
