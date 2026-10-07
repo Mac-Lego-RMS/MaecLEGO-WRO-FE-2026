@@ -426,6 +426,12 @@ class Round1Controller(Node):
         # tight_pylon_clr, e.g. CCW: inside before, red outside / green inside
         # right after the corner): at most this fast. 0 = off.
         'v_tight_pylon': ('v_tight_pylon', 0.30,  float),
+        # Lap 1, a look-ahead halt is due right after this corner (nothing /
+        # nothing coloured known on the next straight): leave the corner at
+        # most this fast so it stands early. cam_5: out of corner 2 at ~0.6
+        # m/s, rolled 31 cm, stood at 1.4 m instead of 1.85 m -- the green
+        # then needed a steep late dodge (1.2-1.8). 0 = off.
+        'v_lookahead_exit': ('v_lookahead_exit', 0.30, float),
         # cam_3: at 0.20 nearly every corner counted as tight (planned 8-16
         # cm is normal) and crawled at 0.26-0.43 m/s; only corner 1 (red ->
         # green, planned 8.5 cm) really was -> 0.10.
@@ -475,6 +481,12 @@ class Round1Controller(Node):
         # front magenta bar in move 2 (the window is ~1 cm).
         'park_start_extra_cw':      ('park_start_extra_cw',      0.015, float),
         'park_start_extra_ccw':     ('park_start_extra_ccw',     0.0, float),
+        # Park this much DEEPER than the parking line gives, via the same
+        # sideways compensation (CCW gets ~4-5 cm from it anyway, because it
+        # reaches the start pose on the pass line: parked 7-8 cm from the
+        # wall; CW reaches the line exactly and stood at 13.6-14.7 cm).
+        'park_depth_extra_cw':      ('park_depth_extra_cw',      0.03, float),
+        'park_depth_extra_ccw':     ('park_depth_extra_ccw',     0.0, float),
         'park_start_clearance_ccw': ('park_start_clearance_ccw', 0.02, float),
         # Deceleration for braking to v_finish before the last corner. With
         # finish_decel 0.8 it braked only ~0.5 m before the turn-in point and
@@ -1491,7 +1503,9 @@ class Round1Controller(Node):
                 "in the bay, correct the park moves, not the line."
                 % (d * 100, self.park_q, BAY_DEPTH, 0.5 * CAR_WIDTH, clear))
         if self.park_q is not None:
-            self.park_q_target = self.park_q          # depth target of the park moves
+            self.park_q_target = self.park_q - (      # depth target of the park moves
+                self.park_depth_extra_cw if self.unpark_direction == 'CW'
+                else self.park_depth_extra_ccw)
             extra = (self.park_start_extra_cw if self.unpark_direction == 'CW'
                      else self.park_start_extra_ccw)
             if extra > 0.0:
@@ -3806,7 +3820,12 @@ class Round1Controller(Node):
             e0 = end(seq)
             J = np.column_stack([end(bent(seq, k, 1.0)) - e0 for k in arcs])
             n = len(arcs)
-            d = np.linalg.solve(J[:n, :n], np.array([-lat, 0.0, 0.0])[:n])
+            # lateral end offset in the frame of the driven (wire) moves: the
+            # outer wall is on the right in CCW, on the LEFT in CW. Without
+            # this the CW correction went the wrong way (cam_5: 1.2 cm too
+            # far inside -> arcs SHORTENED, parked 14.7 cm from the wall).
+            s_wall = 1.0 if self.unpark_direction == "CCW" else -1.0
+            d = np.linalg.solve(J[:n, :n], np.array([-lat * s_wall, 0.0, 0.0])[:n])
         except Exception as err:          # model trouble must never stop parking
             self.get_logger().warn("Parking: sideways compensation skipped (%s)." % err)
             return seq, False
@@ -4402,6 +4421,22 @@ class Round1Controller(Node):
             return fd
         need = o_out + self.min_turn_radius + self.scan_hold_turn_margin
         return max(self.scan_front_dist_min, min(fd, need))
+
+    def _lookahead_after_corner(self):
+        """Will a look-ahead halt follow right after the current corner?"""
+        if (self.v_lookahead_exit <= 0.0 or not self.scan_pause
+                or self.scan_lookahead_halt_front <= 0.0
+                or (self.corner_count // 4) >= self.scan_pause_laps
+                or self.corner_count + 1 >= self.n_corners
+                or self.corners is None or self.walls is None):
+            return False
+        if self.state != 'TURN':
+            return False
+        w = self._exit_wall_idx(self.corner_idx)
+        mine = [o for o in (self.obstacles or []) if o['wall'] == w]
+        if not mine or any(o['color'] not in (OBST_RED, OBST_GREEN) for o in mine):
+            return True
+        return False
 
     def _lookahead_needed(self, corner, tr):
         """Is the look-ahead halt on the current straight worth it?
@@ -5506,6 +5541,8 @@ class Round1Controller(Node):
             r0, r1 = self.min_turn_radius, max(self.v_turn_full_r, self.min_turn_radius + 0.01)
             f = min(max((a.get('R', 1.0) - r0) / (r1 - r0), 0.0), 1.0)
             v = min(v, self.v_tight_turn + f * (self.v_turn - self.v_tight_turn))
+        if self._lookahead_after_corner():
+            v = min(v, self.v_lookahead_exit)
         if self.v_tight_pylon > 0.0:
             if a.get('_clr_key') != (a.get('R'), a.get('T_A')):
                 clr, _w = self._arc_pylon_clearance(a)
@@ -5849,6 +5886,8 @@ class Round1Controller(Node):
                 f = 1.0 - abs(theta_err) / lim
                 v_cap = max(self.v_turn, math.sqrt(self.turn_lat_accel_max * R))
                 v_cmd = min(self.v_turn + f * (self.v_drive - self.v_turn), v_cap)
+        if self._lookahead_after_corner():
+            v_cmd = min(v_cmd, self.v_lookahead_exit)   # no exit acceleration: halt follows
         self.turn_v_cmd = v_cmd
 
         blend = max(0.0, min(1.0, abs(theta_err) / self.ff_blend)) if self.ff_blend > 1e-6 else 1.0
