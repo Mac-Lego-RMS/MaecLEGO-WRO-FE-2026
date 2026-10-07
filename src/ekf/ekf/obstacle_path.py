@@ -98,8 +98,19 @@ class ObstaclePathPlanner:
         return self.lane_width - (obstacle_q + BLOCK_HALF)
 
     # ---------------------------------------------------------------- planning
+    def pass_band(self, obstacle_q, color, ccw):
+        """(lo, hi): offsets from which it passes this obstacle on the correct
+        side with PASS_KEEP_CLEAR -- the same range as _gets_past."""
+        if ((color != COLOR_GREEN) == bool(ccw)):          # pass on the outside
+            lo = max(self.wall_margin,
+                     self.outer_margin + ROBOT_HALF + PASS_KEEP_CLEAR
+                     if self.outer_margin > 0.0 else 0.0)
+            return lo, obstacle_q - BLOCK_HALF - ROBOT_HALF - PASS_KEEP_CLEAR
+        return (obstacle_q + BLOCK_HALF + ROBOT_HALF + PASS_KEEP_CLEAR,
+                self.lane_width - self.wall_margin)
+
     def plan(self, obstacles, straight_length, ccw, q_start=None, s_start=0.0,
-             q_default=None):
+             q_default=None, last_q=None):
         """Build the (s, q) polyline for one straight.
 
         obstacles : list of (s_obs, q_obs, color), s along the straight
@@ -116,6 +127,10 @@ class ObstaclePathPlanner:
 
         # target offset per obstacle
         targets = [(s, self.pass_offset(q, c, ccw)) for (s, q, c) in obs]
+        # last obstacle: an offset chosen by the caller (inside pass_band) --
+        # the entry line the corner after it wants
+        if last_q is not None and targets:
+            targets[-1] = (targets[-1][0], last_q)
 
         pts = []
         if not targets:

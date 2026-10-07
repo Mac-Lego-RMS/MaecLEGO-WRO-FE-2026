@@ -2128,7 +2128,28 @@ class Round1Controller(Node):
             s_end = max(s_end, max(t[0] for t in obs_lane) + 0.3)
 
         planner = self._obs_planner()
+        # Corner after this straight wants another entry line (pylon at the
+        # corner exit): pass the LAST pylon already on it, as far as its
+        # clearance allows -- no lane change between pylon and corner (sim_12:
+        # 0.26 m change right before the turn-in = jerky, and then too little).
+        last_q = None
+        if (q_park is None and obs_lane and self.corner_entry_pref
+                and max(obs_lane, key=lambda t: t[0])[2] in (OBST_RED, OBST_GREEN)):
+            ccw_ = self.dir_step() > 0
+            s_l, q_l, c_l = max(obs_lane, key=lambda t: t[0])
+            q_base = planner.pass_offset(q_l, c_l, ccw_)
+            pref = self._corner_entry_pref(idx, q_base)
+            if pref is not None:
+                lo, hi = planner.pass_band(q_l, c_l, ccw_)
+                q_c = min(max(pref, lo), hi)
+                if abs(q_c - q_base) > 0.02:
+                    last_q = q_c
+                    self.get_logger().info(
+                        "Corner %d: last pylon passed on %.2f instead of %.2f (corner wants "
+                        "%.2f, the pylon allows %.2f-%.2f)."
+                        % (self.corner_count + 1, q_c, q_base, pref, lo, hi))
         pts = planner.plan(obs_lane, s_end, self.dir_step() > 0,
+                           last_q=last_q,
                            q_start=q_now, s_start=s_hold,
                            q_default=(q_park if sides_clear else
                                       (self._lane_default_offset(w_entry)
@@ -2147,15 +2168,8 @@ class Round1Controller(Node):
             q_pref = self._corner_entry_pref(idx, q_last)
         if q_pref is not None:
             slope = max(self.corner_entry_slope, 0.1)
-            need = max(0.20, abs(q_pref - q_last) / slope)
+            need = max(self.obs_transition_min, abs(q_pref - q_last) / slope)
             room = s_end - 0.15 - last_s
-            if abs(q_pref - q_last) > 0.03 and room < need and room >= 0.20:
-                # not the whole way -- as far as the room allows (each cm counts)
-                q_part = q_last + math.copysign(room * slope, q_pref - q_last)
-                self.get_logger().info(
-                    "Corner %d: room for only part of the change to %.2f -> %.2f."
-                    % (self.corner_count + 1, q_pref, q_part))
-                q_pref, need = q_part, room
             if abs(q_pref - q_last) > 0.03 and room >= need:
                 s_r = last_s + min(max(self.obs_transition_pref, need), room)
                 pts = keep + [(last_s, q_last), (s_r, q_pref), (max(s_end, s_r + 0.05), q_pref)]
@@ -2163,7 +2177,7 @@ class Round1Controller(Node):
                     "Corner %d: after the last pylon onto entry line %.2f (instead of %.2f) "
                     "over %.2f m -- more room to the pylon at the corner."
                     % (self.corner_count + 1, q_pref, q_last, s_r - last_s))
-            elif abs(q_pref - q_last) > 0.03:
+            elif abs(q_pref - q_last) > 0.03 and last_q is None:
                 self.get_logger().warn(
                     "Corner %d: entry line %.2f would be better than %.2f, but only "
                     "%.2f m of room (needed %.2f)."
@@ -4887,8 +4901,12 @@ class Round1Controller(Node):
         if not pylons:
             return R
         setpoint = self.arc_pylon_clearance
+        # aim for setpoint + corner_entry_extra: the arc ends up to 7 cm
+        # inside the circle. sim_12: the entry line bought 12 cm, then the
+        # radius closest to 0.50 with just 8 cm was taken again.
+        want = setpoint + max(self.corner_entry_extra, 0.0)
         clr0, which0 = self._arc_pylon_clearance_for(A, B, o_in, o_out, R, theta, pylons)
-        if clr0 is None or clr0 >= setpoint:
+        if clr0 is None or clr0 >= want:
             return R
         candidates = {round(R, 3)}
         r = self.min_turn_radius
@@ -4902,11 +4920,12 @@ class Round1Controller(Node):
             clr, _w = self._arc_pylon_clearance_for(A, B, o_in, o_out, r, theta, pylons)
             if clr is None:
                 continue
-            if clr >= setpoint:
+            if clr >= want:
                 best_clr = (clr, r)
                 break
             if clr > best_clr[0]:
                 best_clr = (clr, r)
+        # want not reachable: the radius with the most clearance (best_clr)
         clr, r = best_clr
         colour = {OBST_RED: 'red', OBST_GREEN: 'green'}.get(which0['color'], '?')
         if clr >= setpoint:
