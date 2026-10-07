@@ -88,7 +88,7 @@ main{max-width:1100px;margin:0 auto;padding:16px;display:grid;gap:16px;grid-temp
 h1{font-size:18px;margin:0 0 4px}.sub{color:var(--mute);font-size:13px;margin:0}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
 svg{width:100%;height:auto;display:block;touch-action:manipulation}
-.seat{cursor:pointer}.seat:hover circle.base{stroke:var(--accent);stroke-width:3}
+.seat{cursor:pointer}.seat:hover circle.base{stroke:var(--accent);stroke-width:0.022}
 fieldset{border:0;padding:0;margin:0 0 12px}legend{font-weight:600;font-size:13px;margin-bottom:6px}
 .seg{display:flex;gap:6px;flex-wrap:wrap}.seg button{flex:1}
 button{font:inherit;padding:7px 10px;border-radius:8px;border:1px solid var(--line);
@@ -135,6 +135,7 @@ code{font:12px ui-monospace,Menlo,monospace;word-break:break-all;color:var(--mut
   <fieldset><legend>Aufstellung</legend>
     <textarea id="spec" spellcheck="false"></textarea>
     <div class="seg" style="margin-top:8px"><button id="load">Laden</button><button id="save" class="primary">Speichern</button></div>
+    <div class="seg" style="margin-top:6px"><button id="randSave" class="primary">&#127922; Zufall + Speichern</button></div>
     <div id="status"></div>
   </fieldset>
   <fieldset><legend>Start</legend>
@@ -162,7 +163,6 @@ function draw(){svg.innerHTML='';
   for(let k=0;k<4;k++){const {u,t}=frame(k);
     const c=[u[0]*1.0,-u[1]*1.0], ah=[c[0]+t[0]*0.32,c[1]-t[1]*0.32], at=[c[0]-t[0]*0.32,c[1]+t[1]*0.32];
     el('line',{x1:at[0],y1:at[1],x2:ah[0],y2:ah[1],stroke:'var(--line)','stroke-width':0.025});
-    const n=[-t[1],-t[0]];
     el('polygon',{points:`${ah[0]},${ah[1]} ${ah[0]-t[0]*0.08+t[1]*0.05},${ah[1]+t[1]*0.08+t[0]*0.05} ${ah[0]-t[0]*0.08-t[1]*0.05},${ah[1]+t[1]*0.08-t[0]*0.05}`,fill:'var(--line)'});
     const lp=[u[0]*1.62,-u[1]*1.62];
     const lab=el('text',{x:lp[0],y:lp[1]+0.04,'font-size':0.11,'text-anchor':'middle',fill:'var(--mute)'});lab.textContent='s'+k;
@@ -184,15 +184,17 @@ function draw(){svg.innerHTML='';
   $('spec').value=toSpec().join('\n')}
 function click(key,locked){
   if(tool==='del'){delete layout[key]}
-  else if(tool==='late'){const o=layout[key];if(o)o.reveal=o.reveal?0:Math.max(20,+$('lateDist').value||80)}
+  else if(tool==='late'){const o=layout[key];if(!o){status('Erst einen Pylon setzen, dann mit "Spät" markieren.','err');return}
+    const d=Math.min(300,Math.max(20,+$('lateDist').value||80));o.reveal=o.reveal===d?0:d}
   else{if(locked){status('Mit Parkbucht ist auf s0 nur die innere Spalte erlaubt.','err');return}
     const [k,row]=key.split(':');for(const c of['inner','outer'])if(`${k}:${row}:${c}`!==key)delete layout[`${k}:${row}:${c}`];
     layout[key]={color:tool,reveal:(layout[key]||{}).reveal||0}}
   draw()}
 function toSpec(){return Object.keys(layout).sort().map(k=>{const [s,row,col]=k.split(':'),o=layout[k];
   return `s${s}:${row}:${col}:${o.color}`+(o.reveal?`:r${o.reveal}`:'')})}
-function fromSpec(lines){layout={};for(const ln of lines){const m=ln.trim().match(/^s([0-3]):(entry|middle|exit):(inner|outer):(red|green)(?::r(\d+))?$/);
-  if(m)layout[`${m[1]}:${m[2]}:${m[3]}`]={color:m[4],reveal:m[5]?+m[5]:0}}draw()}
+function fromSpec(lines){layout={};const bad=[];for(const ln of lines){if(!ln.trim())continue;const m=ln.trim().match(/^s([0-3]):(entry|middle|exit):(inner|outer):(red|green)(?::r(\d+))?$/);
+  if(m)layout[`${m[1]}:${m[2]}:${m[3]}`]={color:m[4],reveal:m[5]?+m[5]:0};else bad.push(ln.trim())}draw();
+  if(bad.length)status('Nicht verstanden: '+bad.join(', '),'err')}
 function status(t,c){const s=$('status');s.textContent=t;s.className=c||''}
 function randomize(){layout={};const nmin=+$('nMin').value,nmax=Math.max(nmin,+$('nMax').value),pct=+$('latePct').value,
   lmin=+$('lateMin').value,lmax=Math.max(lmin,+$('lateMax').value);
@@ -209,7 +211,9 @@ document.querySelectorAll('[data-tool]').forEach(b=>b.onclick=()=>{tool=b.datase
 function sync(){document.querySelectorAll('[data-dir]').forEach(b=>b.classList.toggle('on',b.dataset.dir===dir));
   document.querySelectorAll('[data-tool]').forEach(b=>b.classList.toggle('on',b.dataset.tool===tool))}
 $('rand').onclick=randomize;$('clear').onclick=()=>{layout={};draw()};$('save').onclick=save;$('load').onclick=load;
-$('bay').onchange=draw;$('spec').onchange=()=>fromSpec($('spec').value.split(/[\n+]/));
+$('bay').onchange=()=>{if($('bay').checked){const n=['entry','middle','exit'].filter(r=>layout[`0:${r}:outer`]).length;
+  for(const r of ROWS)delete layout[`0:${r}:outer`];if(n)status(`${n} Pylon(e) außen auf s0 entfernt (Parkbucht).`)}draw()};
+$('randSave').onclick=async()=>{randomize();await save()};$('spec').onchange=()=>fromSpec($('spec').value.split(/[\n+]/));
 sync();draw();load();
 </script></body></html>
 """
