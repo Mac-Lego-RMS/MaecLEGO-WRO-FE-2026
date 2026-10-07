@@ -205,6 +205,12 @@ class Round1Controller(Node):
         # corner with 0.7 cm in theory, 2 cm measured (sim_3 corners 6/10):
         # smaller radius until this is kept. 0 = off.
         'inner_corner_clearance': ('inner_corner_clearance', 0.04, float),
+        # Entry line chosen for the CORNER: if no radius keeps
+        # arc_pylon_clearance to a pylon at the corner (sim_3-5 corner 3: from
+        # the inner line 0.86 past the green at the exit, outer side: 1-4 cm),
+        # after the last pylon of the straight it changes onto the entry line
+        # that does. Measured from 0.70 instead of 0.86: ~13 cm. 0 = off.
+        'corner_entry_pref':  ('corner_entry_pref', 1.0, lambda v: bool(float(v))),
         # Pylons at the corner entry/exit: check the arc against the car
         # outline and choose the radius so that at least this clearance
         # remains (parken_test_20: R 0.50 left 3 mm to the red pylon at the
@@ -2125,6 +2131,31 @@ class Round1Controller(Node):
                                        or self.corner_o_in(idx))))
         if s_hold > 0.0:
             pts = [(0.0, q_now)] + pts        # hold the lane up to s_hold
+        # Not the finish straight: after the last pylon onto the entry line the
+        # corner wants (pylon at the corner exit), if there is room for it.
+        q_pref = None
+        if q_park is None and obs_lane and self.corner_entry_pref:
+            last_s = max(t[0] for t in obs_lane) + max(self.obs_clear_after, 0.10)
+            keep = [(sv, qv) for (sv, qv) in pts if sv <= last_s + 1e-6] or [pts[0]]
+            q_last = keep[-1][1]
+            # judged from the line the path really ends on (it keeps the
+            # corner exit offset, e.g. 0.86 instead of the pass offset 0.81)
+            q_pref = self._corner_entry_pref(idx, q_last)
+        if q_pref is not None:
+            need = max(self.obs_transition_min, abs(q_pref - q_last) / 0.30)
+            room = s_end - 0.15 - last_s
+            if abs(q_pref - q_last) > 0.03 and room >= need:
+                s_r = last_s + min(max(self.obs_transition_pref, need), room)
+                pts = keep + [(last_s, q_last), (s_r, q_pref), (max(s_end, s_r + 0.05), q_pref)]
+                self.get_logger().info(
+                    "Corner %d: after the last pylon onto entry line %.2f (instead of %.2f) "
+                    "over %.2f m -- more room to the pylon at the corner."
+                    % (self.corner_count + 1, q_pref, q_last, s_r - last_s))
+            elif abs(q_pref - q_last) > 0.03:
+                self.get_logger().warn(
+                    "Corner %d: entry line %.2f would be better than %.2f, but only "
+                    "%.2f m of room (needed %.2f)."
+                    % (self.corner_count + 1, q_pref, q_last, max(room, 0.0), need))
         # Finish straight: after the last obstacle back onto the parking line,
         # and done BEFORE the halt point. If the room is not enough, it stays
         # on the pass-by offset -- the approach check after the hold catches
@@ -4683,6 +4714,71 @@ class Round1Controller(Node):
         room = (TA[0] - px) * tx + (TA[1] - py) * ty
         lat_err = abs((A[0] * px + A[1] * py) - LA[2])
         return room > 0.01 and lat_err / room <= self.max_settle_slope
+
+    def _corner_entry_pref(self, idx, o_in0=None):
+        """Entry line (q from the outer wall) for corner idx at which some radius
+        keeps arc_pylon_clearance to the pylons at the corner -- the nearest
+        one to the normal entry line. None if the normal one is fine (or
+        nothing helps by at least 2 cm)."""
+        if (not self.obstacles or self.arc_pylon_clearance <= 0.0 or self.walls is None
+                or self.corners is None or self.lane_width is None):
+            return None
+        cx = sum(c[0] for c in self.corners) / 4.0
+        cy = sum(c[1] for c in self.corners) / 4.0
+        A = self._inward(self.walls[self._entry_wall_idx(idx)], cx, cy)
+        B = self._inward(self.walls[self._exit_wall_idx(idx)], cx, cy)
+        corner = self.corners[idx]
+        pylons = [o for o in self.obstacles
+                  if math.hypot(o['x'] - corner[0], o['y'] - corner[1]) < 1.3]
+        if not pylons:
+            return None
+        try:
+            if o_in0 is None:
+                o_in0 = self.corner_o_in(idx)
+            o_out = self.corner_o_out(idx)
+        except Exception:
+            return None
+        K = self._inner_corner_point(idx, A, B)
+        radii = []
+        r = self.min_turn_radius
+        while r <= self.arc_pylon_r_max + 1e-6:
+            radii.append(r)
+            r += 0.05
+
+        def best(o_in):
+            top = -1.0
+            for rr in radii:
+                poses, _c = self._arc_poses(A, B, o_in, o_out, rr, 0.0)
+                if poses is None:
+                    continue
+                if K is not None and min(self._outline_dist(p, K[0], K[1])
+                                         for p in poses) < 0.03:
+                    continue
+                c = min(self._outline_dist(p, o['x'], o['y']) - BLOCK_HALF
+                        for o in pylons for p in poses)
+                top = max(top, c)
+            return top
+
+        want = self.arc_pylon_clearance + 0.02         # not just on the edge
+        c0 = best(o_in0)
+        if c0 >= want:
+            return None
+        w = self.lane_width[self._entry_wall_idx(idx)]
+        lo, hi = self.obs_wall_margin, w - self.obs_wall_margin
+        cands = sorted({round(o_in0 + 0.05 * k, 3) for k in range(-12, 13)
+                        if lo <= o_in0 + 0.05 * k <= hi and k != 0},
+                       key=lambda q: abs(q - o_in0))
+        top = (c0, None)
+        for q in cands:
+            c = best(q)
+            if c >= want:
+                top = (c, q)
+                break
+            if c > top[0]:
+                top = (c, q)
+        if top[1] is None or top[0] < c0 + 0.02:
+            return None
+        return top[1]
 
     def _inner_corner_point(self, idx, A, B):
         """Corner of the inner band at corner idx: entry and exit line at the
