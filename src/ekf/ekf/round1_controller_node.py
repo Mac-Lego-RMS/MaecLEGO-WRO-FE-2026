@@ -211,6 +211,10 @@ class Round1Controller(Node):
         # after the last pylon of the straight it changes onto the entry line
         # that does. Measured from 0.70 instead of 0.86: ~13 cm. 0 = off.
         'corner_entry_pref':  ('corner_entry_pref', 1.0, lambda v: bool(float(v))),
+        # planned on top of arc_pylon_clearance: the arc ends up to 7 cm
+        # inside the circle (sim_11 corner 2: planned 8.1, driven 2.5-5.8 cm)
+        'corner_entry_extra': ('corner_entry_extra', 0.04, float),
+        'corner_entry_slope': ('corner_entry_slope', 0.35, float),   # lat/long of the change
         # Pylons at the corner entry/exit: check the arc against the car
         # outline and choose the radius so that at least this clearance
         # remains (parken_test_20: R 0.50 left 3 mm to the red pylon at the
@@ -2142,8 +2146,16 @@ class Round1Controller(Node):
             # corner exit offset, e.g. 0.86 instead of the pass offset 0.81)
             q_pref = self._corner_entry_pref(idx, q_last)
         if q_pref is not None:
-            need = max(self.obs_transition_min, abs(q_pref - q_last) / 0.30)
+            slope = max(self.corner_entry_slope, 0.1)
+            need = max(0.20, abs(q_pref - q_last) / slope)
             room = s_end - 0.15 - last_s
+            if abs(q_pref - q_last) > 0.03 and room < need and room >= 0.20:
+                # not the whole way -- as far as the room allows (each cm counts)
+                q_part = q_last + math.copysign(room * slope, q_pref - q_last)
+                self.get_logger().info(
+                    "Corner %d: room for only part of the change to %.2f -> %.2f."
+                    % (self.corner_count + 1, q_pref, q_part))
+                q_pref, need = q_part, room
             if abs(q_pref - q_last) > 0.03 and room >= need:
                 s_r = last_s + min(max(self.obs_transition_pref, need), room)
                 pts = keep + [(last_s, q_last), (s_r, q_pref), (max(s_end, s_r + 0.05), q_pref)]
@@ -2558,7 +2570,11 @@ class Round1Controller(Node):
         'outer', none -> 'middle'. Relative to the robot instead of a fixed
         row, because the bay lies at a different place of the straight
         depending on the layout. Returns (variant, pylon|None)."""
-        default = 'outer' if self.unpark_default_outer else 'middle'
+        # No middle table for this direction (CCW so far): the OUTER one, as
+        # before -- not the normal one (sim_11: CCW drove STEPS_DEFAULT).
+        default = ('outer' if self.unpark_default_outer
+                   or not UNPARK_VARIANTS.get((direction, 'middle'))
+                   else 'middle')
         if self.obstacles is None or self.walls is None or self.pose is None:
             return default, None
         x, y, th = self.pose
@@ -4767,7 +4783,7 @@ class Round1Controller(Node):
                 top = max(top, c)
             return top
 
-        want = self.arc_pylon_clearance + 0.02         # not just on the edge
+        want = self.arc_pylon_clearance + self.corner_entry_extra   # not just on the edge
         c0 = best(o_in0)
         if c0 >= want:
             return None
