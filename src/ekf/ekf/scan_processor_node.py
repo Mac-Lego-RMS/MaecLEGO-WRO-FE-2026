@@ -156,9 +156,10 @@ START_SCAN_MAX_ALONG = 0.75    # only seats up to this far along the straight (a
                                # (~1 m) cannot be seen from the bay and does not
                                # matter for unparking -- normal driving detects it.
 
-# Unparking: votes rest as soon as the robot starts moving, until it is out of
-# the bay AND parallel to the straight again. Swung out of the bay, partly still
-# between the walls -- that only produces bad votes.
+# Unparking: votes rest as soon as the robot starts moving, until the LiDAR is
+# out of the bay (_bay_cleared). Partly still between the walls -- that only
+# produces bad votes. The phase itself ('exiting' -> 'clear') still ends only
+# out of the bay AND parallel to the straight again.
 BAY_MOVE_DIST = 0.03           # moving detected from this much travel ...
 BAY_MOVE_ANGLE = np.radians(3.0)   # ... or this much rotation since the commit
 EXIT_HEADING_TOL = np.radians(15.0)  # heading counts as parallel to the straight
@@ -324,6 +325,16 @@ class ScanProcessor(Node):
         # allowed (rules). Published like detected pylons, never released.
         self.sim_obstacles_spec = self.declare_parameter(
             'sim_obstacles', '').get_parameter_value().string_value.strip()
+        # false: the colour scan still runs and /obstacles_live is still
+        # published (for the bag), but nothing of it reaches the run -- no
+        # votes in the obstacle map, no pillar mask for the wall extraction.
+        # For runs with predefined pylons (sim_obstacles) only.
+        self.color_obstacles = self.declare_parameter(
+            'color_obstacles', True).get_parameter_value().bool_value
+        if not self.color_obstacles:
+            self.get_logger().warn(
+                'color_obstacles=false: colour scan is only published, it does not '
+                'feed the obstacle map or the wall mask.')
         self.sim_seats = []
         self.sim_hidden = []          # simulated pylons that appear later (r<cm>)
         self.started = not self.wait_for_button
@@ -702,6 +713,11 @@ class ScanProcessor(Node):
         dets = [d for d in dets
                 if abs(np.arctan2(d['y'], d['x'] - LIDAR_OFFSET_X)) < np.pi - BLOCK_ANGLE]
 
+        if not self.color_obstacles:
+            # recorded only, see the parameter
+            self._publish_obstacles_live(dets, msg.header.stamp)
+            return
+
         # hand the pillar directions to the wall extraction. Set every scan,
         # including the empty case, so the mask clears once a pillar is passed.
         # Colour scan and /scan come from the same LiDAR at the same rate, so
@@ -724,8 +740,16 @@ class ScanProcessor(Node):
                 dets = self._bay_opening_filter(dets)
                 if not dets:
                     return
-            elif self.bay_phase == 'exiting':
-                return                     # votes rest while unparking
+            elif self.bay_phase == 'exiting' and not self._bay_cleared():
+                # votes rest only while the LiDAR is still between the bay
+                # walls. Out of the bay they count at once: from a bay just
+                # before the corner the robot swings straight into the turn
+                # and never gets parallel to the start straight, so 'clear'
+                # only came with EXIT_MAX_DIST -- by then the pylon right
+                # after unparking was already behind it (sim_14: seen
+                # 18.3-23.1 s, green, 1-3 cm off, out of the bay at 18.2 s,
+                # 'clear' at 23.4 s).
+                return
             # 'clear': everything counts
         elif self._in_parking_bay():
             # Parking bay start without bay measurement (wait_for_parking): the
@@ -1071,7 +1095,7 @@ class ScanProcessor(Node):
                     or abs(self.bay_odo_turn) > BAY_MOVE_ANGLE):
                 self.bay_phase = 'exiting'
                 self.get_logger().info(
-                    'Unparking starts -- obstacle votes rest until the end')
+                    'Unparking starts -- obstacle votes rest until the LiDAR is out of the bay')
                 if self.start_scan_state == 'scanning':
                     self._finish_start_scan('incomplete',
                                             'moved off before everything was decided')
@@ -1340,7 +1364,8 @@ class ScanProcessor(Node):
             self.bay_left = True
             self.get_logger().info(
                 f'LiDAR has left the parking bay (field y={y_field:.2f}) -- '
-                f'waiting for a heading parallel to the straight')
+                f'obstacle votes count again; waiting for a heading parallel '
+                f'to the straight')
         return self.bay_left
 
     # ------------------------------------------------------------------ #
