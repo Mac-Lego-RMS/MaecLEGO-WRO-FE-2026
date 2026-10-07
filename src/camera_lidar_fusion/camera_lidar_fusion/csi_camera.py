@@ -180,6 +180,24 @@ class CsiCamera(Node):
             else:
                 gb = 1.0 / np.polyval(c['pb'], rr)
                 gr = 1.0 / np.polyval(c['pr'], rr)
+            if 'az_rg' in c.files:
+                # Azimuthal part (07.10.2026): the lens does not sit exactly on
+                # the optical axis, so the colour also depends on the direction,
+                # not only on the radius -- on the mat at the ring R/G 1.06 and
+                # B/G 1.04 at image azimuth 0 deg, B/G 0.94 at 220 deg, the same
+                # in two places on the field. The enhancement multiplies that by
+                # up to 3.5, and green pylons on the right of the robot came out
+                # grey. Factor per sector on top of the radial table, faded in
+                # from r 0.65 to 0.80 like the radial mat correction.
+                a = np.asarray(c['az_deg'], dtype=np.float64)
+                xs = np.concatenate([a - 360.0, a, a + 360.0])
+                az = np.degrees(np.arctan2(yy - cy, xx - cx)) % 360.0
+                f_rg = np.interp(az, xs, np.tile(c['az_rg'], 3)).astype(np.float32)
+                f_bg = np.interp(az, xs, np.tile(c['az_bg'], 3)).astype(np.float32)
+                t = np.clip((np.sqrt(rr) - 0.65) / 0.15, 0.0, 1.0)
+                wgt = t * t * (3.0 - 2.0 * t)
+                gr = gr / (1.0 + wgt * (f_rg - 1.0))
+                gb = gb / (1.0 + wgt * (f_bg - 1.0))
             lum = 1.0 / np.polyval(c['pl'], rr) if 'pl' in c.files else np.ones_like(rr)
             lum = np.minimum(lum, float(c['gain_max']) if 'gain_max' in c.files else 2.5)
             gmap = np.stack([gb * lum, lum, gr * lum], axis=2)
@@ -187,6 +205,7 @@ class CsiCamera(Node):
             self.get_logger().info(
                 f'colour shading correction from {path}: centre ({cx:.0f}, {cy:.0f}), '
                 f'radius {rad:.0f} px, edge gains R {gr.min():.2f} B {gb.min():.2f}'
+                f'{", per azimuth" if "az_rg" in c.files else ""}'
                 f'{", vignetting up to x%.2f" % lum.max() if "pl" in c.files else ""}')
         except Exception as err:      # a broken file must not stop the camera
             self.get_logger().error(f'colour shading correction: {path} unusable ({err})')

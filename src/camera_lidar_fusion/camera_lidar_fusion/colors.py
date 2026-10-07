@@ -397,7 +397,7 @@ def classify_zone(image_bgr: np.ndarray, phi: np.ndarray, r_inner: np.ndarray,
                   use_frac: float = 1.0, adaptive_factor: float = 0.0,
                   adaptive_deg: float = 20.0,
                   rg_z_min: float = 0.15, rg_s_min: int = 60,
-                  rg_d_min: int = 20, z0=None):
+                  rg_d_min: int = 20, z0=None, rg_d_min_red: int = None):
     """Colour per point by voting over a radial segment.
 
     The segment is NOT of constant width; it is computed per point from two
@@ -530,7 +530,15 @@ def classify_zone(image_bgr: np.ndarray, phi: np.ndarray, r_inner: np.ndarray,
             # counts. Measured on the setup the wall band sits at
             # |G-R| = 0 (5..95 percentile -2..+9), the green pylon at 38,
             # the red one at 110.
-            hit &= np.abs(dd) >= rg_d_min
+            #
+            # Red can have its own, higher gate (rg_d_min_red). With the CSI
+            # camera the dark wall band tips slightly red (G-R down to -18,
+            # 10th percentile) while the green pylon only reaches +25 -- one
+            # symmetric gate cannot separate both. Red pylons sit at -60..-95.
+            d_min = rg_d_min
+            if name == 'red' and rg_d_min_red is not None and rg_d_min_red >= 0:
+                d_min = rg_d_min_red
+            hit &= np.abs(dd) >= d_min
         else:
             # magenta (parking zone) stays on the hue path: the hue is
             # unambiguous there and there is no measurement series for a better

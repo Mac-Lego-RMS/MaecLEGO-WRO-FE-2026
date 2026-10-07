@@ -298,6 +298,8 @@ class LidarPixelMapper(Node):
         # Absolute gate on |G-R| in counts. Catches the colour cast across
         # the fisheye, to which the relative gates are blind.
         self.declare_parameter('rg_d_min', 20)
+        # Own |G-R| gate for red; -1 = same as rg_d_min. See classify_zone.
+        self.declare_parameter('rg_d_min_red', -1)
         # --- neutral point / white balance on the field -------------------- #
         # rg_index assumes that a colourless surface gives z=0. Measured on the
         # setup the WHITE mat gives z=+0.084 -- so red needs a 3.5 times larger
@@ -922,6 +924,7 @@ class LidarPixelMapper(Node):
                 rg_z_min=float(self.get_parameter('rg_z_min').value),
                 rg_s_min=int(self.get_parameter('rg_s_min').value),
                 rg_d_min=int(self.get_parameter('rg_d_min').value),
+                rg_d_min_red=int(self.get_parameter('rg_d_min_red').value),
                 z0=z0)
         else:
             bgr, hsv = colors.sample_colors(

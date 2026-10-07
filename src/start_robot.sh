@@ -263,6 +263,26 @@ FUSION_BAND_STEPS=360     # 180 saves 10 percent CPU, 2 degrees are enough for a
 # behind, in the same azimuth -- there the zone still picks up the pylon. It lies
 # on no pylon seat and therefore does not lock in.
 FUSION_RG_DMIN=10
+# 07.10.2026: own |G-R| gate for RED (-1 = same as FUSION_RG_DMIN). With the CSI
+# camera and the mat-based shading (config/csi_shading.npz) the dark wall band
+# tips slightly red (G-R down to -18) and 10 lets it through, while the green
+# pylon only reaches +25 -- so the common gate cannot go up. Red pylons sit at
+# -60..-95. Same layout, colored_scan, wrong detections off the pylons:
+#     red gate 10 (sim_17/18):  ~2140 red, ~320 green; green pylons 37..94 % green
+#     red gate 30 (sim_19):        345 red,  385 green; green pylons 98..100 % green
+# Price: red pylons are detected up to ~1.2-1.6 m instead of 1.5-1.9 m (the map
+# only trusts colour below 1.6 m anyway). sim_19 ran on the camera alone: all six
+# pylons right before the lap-1 freeze, no wrong seat.
+FUSION_RG_DMIN_RED=30
+# 07.10.2026: minimum saturation for red/green lowered from 60 (code default)
+# to 40. Green pylons with the CSI camera are pale from ~0.8 m on (S 20-35 on
+# their lower part). Re-classified on 450 frames from three runs: green pylon
+# at 0.8-1.4 m recognised in 41 -> 53 % of the frames; extra wrong green only
+# lands on the locked outer seats of the start straight. Red is unaffected.
+# Works together with the zone moved 8 px inwards (zone_r0_* 482.1 in
+# config/fisheye_calib.yaml). cam_12: all six pylons right before the lap-1
+# freeze, green ones seen up to 1.6-1.9 m.
+FUSION_RG_SMIN=40
 FUSION_RG_ZMIN=0.10
 FUSION_ZONE_ADAPTIVE=0.0
 # --- Measure the camera's neutral point per azimuth sector on the white mat ---
@@ -278,7 +298,15 @@ FUSION_ZONE_ADAPTIVE=0.0
 #     real green pylon at 2.55 m: 11.5 -> 12.5 points
 #     real green pylon at 0.56 m: 16.1 -> 10.6 points (price of the correction)
 # Set to false to switch it off -- then everything behaves as before.
-FUSION_WHITE_POINT=true
+#
+# 07.10.2026 switched OFF. With the CSI camera (f 312 px/rad) this ring only
+# sees mat between 0.42 and 2.2 m -- in a 1 m lane the walls stand at 0.3-0.7 m,
+# so sideways it measured the black wall band and nearby pylons instead of the
+# mat. A green pylon close by went into its own neutral point (z0 jumped to
+# +0.08..+0.15 exactly while green pylons stood close on the right) and was
+# corrected away. The colour cast is now handled in the camera itself
+# (config/csi_shading.npz: mat-based radial table plus a factor per azimuth).
+FUSION_WHITE_POINT=false
 # 12 sectors = 30 degrees. Finer makes the measurement per sector noisier, coarser
 # gives away the drift over the azimuth (span 0.075 over 12 sectors).
 FUSION_WHITE_POINT_SECTORS=12
@@ -771,6 +799,8 @@ run_window 5 foxglove "ros2 run ekf foxglove_overlay"
        -p band_steps:=$FUSION_BAND_STEPS \
        -p sample_zone_adaptive:=$FUSION_ZONE_ADAPTIVE \
        -p rg_d_min:=$FUSION_RG_DMIN \
+       -p rg_d_min_red:=$FUSION_RG_DMIN_RED \
+       -p rg_s_min:=$FUSION_RG_SMIN \
        -p rg_z_min:=$FUSION_RG_ZMIN \
        -p white_point:=$FUSION_WHITE_POINT \
        -p white_point_sectors:=$FUSION_WHITE_POINT_SECTORS \
