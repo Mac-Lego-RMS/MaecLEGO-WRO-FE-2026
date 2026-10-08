@@ -24,6 +24,7 @@ WITHOUT a backwards predict (see STALE_TOLERANCE). Only gaps larger than the
 tolerance -- real transport hiccups -- are still dropped.
 """
 import heapq
+import math
 import time
 import numpy as np
 
@@ -35,6 +36,10 @@ from rclpy.node import Node
 from sensor_msgs.msg import Imu, JointState
 from nav_msgs.msg import Odometry
 from rclpy.qos import QoSProfile, DurabilityPolicy
+
+WALL_OUTLIER_ALPHA = math.radians(6.0)   # this far off in angle ...
+WALL_OUTLIER_D = 0.05                    # ... and this far in distance ...
+WALL_OUTLIER_REF = math.radians(3.0)     # ... while another wall of the scan is within this
 from std_msgs.msg import Bool, Header
 
 from robot_msgs.msg import WallMatchArray
@@ -143,6 +148,7 @@ class EKFNode(Node):
                                ParameterDescriptor(dynamic_typing=True))
         self.wall_max_age = float(self.get_parameter('wall_max_age').value)
         self.n_wall_stale = 0
+        self.n_wall_outlier = 0
         self.publish_rate = float(self.get_parameter('publish_rate_hz').value)
         # Only publish if something was really computed since the last time.
         # Otherwise the odometry would just keep going with failed sensors and
@@ -299,7 +305,28 @@ class EKFNode(Node):
                     f'{self.wall_max_age * 1e3:.0f} ms, total {self.n_wall_stale}) -- '
                     f'is the scan_processor keeping up?', throttle_duration_sec=1.0)
                 return
+        # Outlier wall: angle AND distance far off while another wall of the
+        # same scan agrees with the heading -> a wrongly fitted line (cam_43,
+        # end of corner 3: "front wall" 9-13 deg / 8-12 cm off, the side walls
+        # within 1 deg; taken twice it moved the pose 17 cm along the
+        # straight, a real green pylon was then released and knocked over).
+        # Is the heading itself off, all walls disagree -- then nothing is dropped.
+        x, y, th = self.ekf.x[0], self.ekf.x[1], self.ekf.x[2]
+        inn = []
         for wm in msg.matches:
+            za = abs(float(np.arctan2(np.sin(wm.alpha_meas - wm.alpha_map + th),
+                                      np.cos(wm.alpha_meas - wm.alpha_map + th))))
+            zd = abs(wm.d_meas - (wm.d_map - (x * np.cos(wm.alpha_map) + y * np.sin(wm.alpha_map))))
+            inn.append((za, zd))
+        good_heading = any(za < WALL_OUTLIER_REF for za, _zd in inn)
+        for wm, (za, zd) in zip(msg.matches, inn):
+            if good_heading and za > WALL_OUTLIER_ALPHA and zd > WALL_OUTLIER_D:
+                self.n_wall_outlier += 1
+                self.get_logger().warn(
+                    f'wall match dropped: {np.degrees(za):.1f} deg / {zd * 100:.1f} cm off while '
+                    f'another wall fits the heading (total {self.n_wall_outlier})',
+                    throttle_duration_sec=0.5)
+                continue
             self.ekf.update_wall(wm.alpha_meas, wm.d_meas, wm.alpha_map, wm.d_map)
         if msg.matches:
             self._mark(stamp_to_sec(msg.header.stamp))
