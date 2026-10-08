@@ -1399,7 +1399,13 @@ uint8_t calHandleAction(SCSCL* servo, uint8_t action, uint8_t arg) {
 // A new base does NOT cancel a running one-shot - a bridge that refreshes its
 // status colour every second would otherwise cut off every event flash.
 
-constexpr int      PIXEL_COUNT      = 4;     // LEDs in the chain (max. 32)
+// 9 LEDs round the LiDAR since 08.10.2026: 0-2 left side, 3-5 front, 6-8
+// right side, counted from the left. The sweep/scan modes work in groups of
+// PIXEL_GROUP neighbouring LEDs (= one side), the position in the group comes
+// from the index -- no protocol change, each LED of a side gets the same
+// command.
+constexpr int      PIXEL_COUNT      = 9;     // LEDs in the chain (max. 32)
+constexpr int      PIXEL_GROUP      = 3;     // LEDs per side (sweep / scan)
 static_assert(PIXEL_COUNT >= 1 && PIXEL_COUNT <= 32, "g_pxShotMask holds 32 LEDs");
 constexpr uint32_t PIXEL_FRAME_MS   = 20;    // 50 Hz
 constexpr uint32_t PIXEL_REFRESH_MS = 1000;  // resend even if unchanged (glitch recovery)
@@ -1412,11 +1418,18 @@ enum PixelMode : uint8_t {
     PX_RAINBOW   = 4,   // hue cycle, shifted along the chain; colour bytes ignored
     PX_STROBE    = 5,   // short flash at the start of each period
     PX_HEARTBEAT = 6,   // double pulse
+    PX_SWEEP     = 7,   // sequential turn signal: the LEDs of a group light up one
+                        // after the other (ascending index), stay on, all off
+    PX_SWEEP_REV = 8,   // the same, descending index
+    PX_SCAN      = 9,   // running light: one dot with a fading tail moves back and
+                        // forth over the group (KITT)
+    PX_SCAN_ALL  = 10,  // the same over the whole chain
     PX_MODE_COUNT
 };
 
 static const char* const PX_MODE_NAMES[PX_MODE_COUNT] = {
-    "off", "solid", "blink", "breathe", "rainbow", "strobe", "heart"
+    "off", "solid", "blink", "breathe", "rainbow", "strobe", "heart",
+    "sweep", "sweepr", "scan", "scanall"
 };
 
 struct PixelAnim {
@@ -1444,6 +1457,10 @@ static uint16_t pixelDefaultPeriod(uint8_t mode) {
         case PX_RAINBOW:   return 5000;
         case PX_STROBE:    return 1000;
         case PX_HEARTBEAT: return 1200;
+        case PX_SWEEP:
+        case PX_SWEEP_REV: return 700;    // ~1.4 Hz like a car indicator
+        case PX_SCAN:      return 900;
+        case PX_SCAN_ALL:  return 1800;
         default:           return 1000;   // off/solid: time base for count only
     }
 }
@@ -1548,6 +1565,32 @@ static void pixelRender(const PixelAnim& a, int idx, uint32_t t, uint8_t out[4])
             // Two beats at 0..10 % and 20..30 % of the period, then a pause.
             uint32_t p10 = ph * 10 / per;
             level = (p10 == 0 || p10 == 2) ? 255 : 0;
+            break;
+        }
+        case PX_SWEEP:
+        case PX_SWEEP_REV: {
+            // 0..50 %: the LEDs come on one after the other, until 75 % all
+            // on, then dark -- the classic sequential indicator.
+            int slot = idx % PIXEL_GROUP;
+            if (a.mode == PX_SWEEP_REV) slot = PIXEL_GROUP - 1 - slot;
+            uint32_t on_at  = per / 2 * (uint32_t)slot / PIXEL_GROUP;
+            uint32_t off_at = per * 3 / 4;
+            level = (ph >= on_at && ph < off_at) ? 255 : 0;
+            break;
+        }
+        case PX_SCAN:
+        case PX_SCAN_ALL: {
+            // Dot position as a triangle wave over the group (0 .. n-1 .. 0),
+            // brightness falls off with the distance to it: the LED it just
+            // left still glows -- the KITT tail.
+            const int n    = (a.mode == PX_SCAN_ALL) ? PIXEL_COUNT : PIXEL_GROUP;
+            const int slot = (a.mode == PX_SCAN_ALL) ? idx : idx % PIXEL_GROUP;
+            float u   = (float)ph / (float)per;                    // 0..1
+            float pos = (u < 0.5f ? 2.0f * u : 2.0f - 2.0f * u) * (float)(n - 1);
+            float dist = fabsf((float)slot - pos);
+            float x = 1.0f - dist / 1.6f;                          // ~1.6 LEDs wide
+            if (x < 0.0f) x = 0.0f;
+            level = (uint32_t)lroundf(x * x * 255.0f);
             break;
         }
         case PX_OFF:
