@@ -333,6 +333,20 @@ class Round1Controller(Node):
         # otherwise the hold decides o_out and keeps 1.10. 0 = always
         # scan_front_dist (default since sim_4: the holds should be uniform).
         'scan_front_dist_min': ('scan_front_dist_min', 0.0, float),
+        # The scan hold never lies past the turn-in point: at least this far
+        # before T_A. cam_63 corner 4: red pylon at the corner -> R 0.65,
+        # T_A 1.41 m from the front wall, scan hold target 1.05 -- it rolled
+        # 23 cm past T_A, turned in on the smallest radius and hit the pylon.
+        'scan_ta_margin':   ('scan_ta_margin',   0.10, float),
+        # Brake cap before the scan hold looks this far ahead in time (drive
+        # lag: commanded 0.73, measured 0.83 m/s). cam_63 corner 1: from
+        # 0.9 m before the hold it reached 0.83 m/s and coasted 47 cm.
+        'scan_cap_lead':    ('scan_cap_lead',    0.40, float),
+        # Slow while the heading is far off the line/path (after unparking
+        # -59 deg, after a corner overshoot): Stanley swings through at
+        # speed (cam_63: -59 -> +27 deg at 0.8 m/s). 0 = off.
+        'v_heading_align':  ('v_heading_align',  0.35, float),
+        'heading_align_deg': ('heading_align_deg', 20.0, float),
         'scan_hold_turn_margin': ('scan_hold_turn_margin', 0.05, float),
         # It still rolls this far after the halt command (measured ~13 cm).
         # The halt is triggered this much earlier, otherwise it stands right
@@ -443,6 +457,14 @@ class Round1Controller(Node):
         'led_blink_colour': ('led_blink_colour', 'orange', str),
         'led_scan_colour':  ('led_scan_colour',  'red', str),
         'led_blink_dist':   ('led_blink_dist',   0.60, float),   # m before T_A
+        # After the scan hold: the pylons of the next straight for this long,
+        # left group = first one after the corner, right group = second.
+        # Colour of a pylon whose colour is not known. 0 s = off.
+        'led_hold_show_s':  ('led_hold_show_s',  1.5, float),
+        'led_unknown_colour': ('led_unknown_colour', 'blue', str),
+        # Headlight flash on the front LEDs when it drives off after a halt
+        # (scan hold and look-ahead halt). '' = off.
+        'led_flash':        ('led_flash', '3-5: blink white bri=255 ms=240 x=2', str),
         # Obstacle straights: v_obstacle only in zones around the pylons and
         # the lane changes, v_drive in between (cam_6: straights 1 and 2 with
         # pylons only at the start and the end ran at 0.55 all the way).
@@ -1302,6 +1324,43 @@ class Round1Controller(Node):
         colour = self.led_scan_colour if side == 'front' else self.led_blink_colour
         n = max(1, int(math.ceil(seconds * 1000.0 / period_ms)))
         self.pub_pixel.publish(String(data='%s %s ms=%d x=%d' % (spec, colour, period_ms, n)))
+
+    def _next_straight_pylons(self):
+        """Pylons on the straight after corner_idx, nearest to the corner
+        first (= in the order the car meets them)."""
+        if not self.obstacles or self.corners is None or self.corner_idx is None:
+            return []
+        w = self._exit_wall_idx(self.corner_idx)
+        c = self.corners[self.corner_idx]
+        mine = [o for o in self.obstacles if o['wall'] == w]
+        return sorted(mine, key=lambda o: (o['x'] - c[0]) ** 2 + (o['y'] - c[1]) ** 2)
+
+    def _led_after_hold(self, show_pylons):
+        """Driving off after a halt: headlight flash on the front and, after
+        the scan hold, the pylons of the next straight for a moment -- left
+        group the first one after the corner, right group the second. All
+        one-shots, the status colour comes back by itself."""
+        if not self.led_effects:
+            return
+        if show_pylons and self.led_hold_show_s > 0.0:
+            names = {OBST_RED: 'red', OBST_GREEN: 'green'}
+            pyl = self._next_straight_pylons()[:2]
+            ms = int(self.led_hold_show_s * 1000.0)
+            groups = (self.led_left.split(':')[0], self.led_right.split(':')[0])
+            shown = []
+            for group, o in zip(groups, pyl):
+                colour = names.get(o['color'], self.led_unknown_colour)
+                self.pub_pixel.publish(String(
+                    data='%s: solid %s ms=%d x=1' % (group, colour, ms)))
+                shown.append(colour)
+            if shown:
+                # the corner indicator would cut the display short on its side
+                self._led_hold_until = self.now_s() + self.led_hold_show_s
+                self.get_logger().info(
+                    "LEDs: next straight %s (left = first, right = second)."
+                    % ' / '.join(shown))
+        if self.led_flash.strip():
+            self.pub_pixel.publish(String(data=self.led_flash))
 
     def _led_turn_side(self):
         """Side the car turns to in the corners: CW right, CCW left."""
@@ -4036,7 +4095,9 @@ class Round1Controller(Node):
         self.park_avg_poses = []
 
     def _park_start_sequence(self):
-        self._led_effect('left' if self.unpark_direction == 'CW' else 'right', 8.0, 700)
+        # Hazard lights: both sides (sweep / sweepr run mirrored).
+        self._led_effect('left', 8.0, 700)
+        self._led_effect('right', 8.0, 700)
         if getattr(self, 'park_corr_applied', False):
             self._park_start_moves(list(self.park_in_steps), 'in')   # already corrected
             return
@@ -4721,7 +4782,18 @@ class Round1Controller(Node):
         self.last_cmd = (0.0, 0.0)
 
     def _scan_hold_front(self):
-        """Distance rear axle -> front wall for the scan hold of this corner."""
+        """Distance rear axle -> front wall for the scan hold of this corner --
+        never past the turn-in point (see scan_ta_margin)."""
+        fd = self._scan_hold_front_base()
+        if (self.scan_ta_margin >= 0.0 and self.arc is not None
+                and self.corners is not None):
+            c = self.corners[self.corner_idx]
+            tr, tA = self.arc['travel'], self.arc['T_A']
+            f_ta = (c[0] - tA[0]) * tr[0] + (c[1] - tA[1]) * tr[1]
+            fd = max(fd, f_ta + self.scan_ta_margin)
+        return fd
+
+    def _scan_hold_front_base(self):
         fd = self.scan_front_dist
         if self.scan_front_dist_min <= 0.0 or self.scan_front_dist_min >= fd:
             return fd
@@ -4796,9 +4868,36 @@ class Round1Controller(Node):
         if (not self.lookahead_halt_done_this_straight and self.scan_lookahead_halt_front > 0.0
                 and self._lookahead_needed(corner, tr)[0]):
             target = max(target, self.scan_lookahead_halt_front)
-        rest = front_dist - target - coast
+        rest = front_dist - target - coast - max(self.v_act, 0.0) * self.scan_cap_lead
         return max(self.v_finish_min,
                    math.sqrt(2.0 * self.scan_decel * max(rest, 0.0)))
+
+    def _heading_align_cap(self):
+        """v_heading_align while the heading is more than heading_align_deg
+        off the direction of the path (obstacle path segment or the line)."""
+        if (self.v_heading_align <= 0.0 or self.state != 'DRIVE'
+                or self.arc is None or self.pose is None):
+            return None
+        x, y, th = self.pose
+        tr = self.arc['travel']
+        ref = math.atan2(tr[1], tr[0])
+        path = self.obs_path
+        if path and len(path) >= 2:
+            best = None
+            for (ax, ay), (bx, by) in zip(path[:-1], path[1:]):
+                dx, dy = bx - ax, by - ay
+                L2 = dx * dx + dy * dy
+                if L2 < 1e-9:
+                    continue
+                t = max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / L2))
+                d = math.hypot(x - ax - t * dx, y - ay - t * dy)
+                if best is None or d < best[0]:
+                    best = (d, math.atan2(dy, dx))
+            if best is not None:
+                ref = best[1]
+        if abs(wrap(th - ref)) > math.radians(self.heading_align_deg):
+            return self.v_heading_align
+        return None
 
     def _v_cap(self):
         """Upper limit for the speed in the current phase, or None."""
@@ -4808,6 +4907,9 @@ class Round1Controller(Node):
         vb = self._scan_brake_cap()
         if vb is not None:
             cap = vb if cap is None else min(cap, vb)
+        va = self._heading_align_cap()
+        if va is not None:
+            cap = va if cap is None else min(cap, va)
         # Steep dodge path (pylon seen late): slower, otherwise it overshoots
         # far beyond the path direction (parken_test_42: path 1.22 lat per
         # long = 51 deg, driven up to 82 deg off the straight).
@@ -5687,6 +5789,7 @@ class Round1Controller(Node):
                     f"(o_out={self.corner_o_out(self.corner_idx):.2f}).")
         self.state = 'DRIVE'
         self.get_logger().info("SCAN HOLD done, plan updated.")
+        self._led_after_hold(getattr(self, 'scan_pause_kind', 'scan') == 'scan')
 
     def now_s(self):
         return self.get_clock().now().nanoseconds * 1e-9
@@ -5918,7 +6021,8 @@ class Round1Controller(Node):
         if (self.led_effects and self.corner_count < self.n_corners
                 and getattr(self, '_led_blinked_corner', -1) != self.corner_count
                 and 0.0 < to_TA < self.led_blink_dist
-                and self.state == 'DRIVE'):
+                and self.state == 'DRIVE'
+                and self.now_s() >= getattr(self, '_led_hold_until', 0.0)):
             self._led_blinked_corner = self.corner_count
             self._led_effect(self._led_turn_side(), 3.0, 700)
         # distance travelled since the corner start (for the accel ramp)
@@ -6014,6 +6118,7 @@ class Round1Controller(Node):
                 # it already comes out of the corner closer, the look-ahead halt is dropped.
                 if front_dist - coast >= self._scan_hold_front() + 0.25:
                     self.scan_hold_duration = self.scan_lookahead_halt_s
+                    self.scan_pause_kind = 'lookahead'
                     self.scan_pause_t0 = self.now_s()
                     self.state = 'SCAN_PAUSE'
                     self.publish_stop()
@@ -6028,6 +6133,7 @@ class Round1Controller(Node):
                 self.scan_done_this_straight = True
                 self.lookahead_halt_done_this_straight = True
                 self.scan_hold_duration = self.scan_pause_s
+                self.scan_pause_kind = 'scan'
                 self.scan_pause_t0 = self.now_s()
                 self.state = 'SCAN_PAUSE'
                 self.publish_stop()
