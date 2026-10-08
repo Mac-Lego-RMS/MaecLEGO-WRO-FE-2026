@@ -37,6 +37,7 @@ Publishes:  /wall_matches
             /inner_geometry    (latched) inner band
             /obstacles         (latched) accumulated obstacle set, map frame
 """
+import math
 import numpy as np
 import re
 import time
@@ -146,6 +147,14 @@ SEAT_CLEAR_MIN_RANGE = 0.12    # closer: own chassis, not an occluder
 # 10 hits / 20 see-throughs -> released 1 s before the scan hold, re-entered
 # too late, knocked over.
 SEAT_CLEAR_MAX_HITS = 2
+# A see-through / hit only counts again once the car has moved this far or
+# turned this much since the last one counted for that seat: scans at
+# standstill are the same view again, not new evidence. cam_43: during the
+# look-ahead halt the pose was 14.5 cm off along the straight (wrong jump at
+# the end of corner 3), every one of the 22 standstill scans "saw through"
+# the real green #13 -> released.
+SEAT_CLEAR_MIN_MOVE = 0.03     # m
+SEAT_CLEAR_MIN_TURN = 0.05     # rad (~3 deg)
 # Count colour only with a steady heading, occupancy always. While turning,
 # image and scan do not match (offset up to ~0.5 s): parken_test_42, red #17
 # from 0.3-0.5 m at 1.5-1.75 rad/s five times GREEN, otherwise always red --
@@ -372,6 +381,7 @@ class ScanProcessor(Node):
         self.clear_run = {}          # see-throughs in a row
         self.clear_through = {}      # see-throughs in total
         self.clear_hits = {}         # hits at the seat in total
+        self.clear_pose = {}         # pose of the last counted check per seat
         self.yaw_rate = 0.0          # from /ekf/odom, for the release
         self.bay_odo_travel = 0.0    # own motion since the commit in the bay
         self.bay_odo_turn = 0.0
@@ -1287,6 +1297,11 @@ class ScanProcessor(Node):
             d = float(np.hypot(dx, dy))
             if d > SEAT_CLEAR_MAX_DIST or d < 0.15:
                 continue
+            last = self.clear_pose.get(sid)
+            if (last is not None and math.hypot(px - last[0], py - last[1]) < SEAT_CLEAR_MIN_MOVE
+                    and abs(math.atan2(math.sin(th - last[2]), math.cos(th - last[2])))
+                    < SEAT_CLEAR_MIN_TURN):
+                continue                       # same view as last time: no new evidence
             b = np.arctan2(dy, dx) - th
             half = np.arctan2(PILLAR_HALF_WIDTH + SEAT_CLEAR_MARGIN, d)
             cone = ((np.abs((ang - b + np.pi) % (2 * np.pi) - np.pi) < half)
@@ -1296,6 +1311,7 @@ class ScanProcessor(Node):
             r = rng[cone]
             if (r < d - SEAT_RANGE_TOL).any():
                 continue                       # occluded: no verdict
+            self.clear_pose[sid] = (px, py, th)
             if (r <= d + SEAT_RANGE_TOL).any():
                 self.clear_run[sid] = 0
                 self.clear_hits[sid] = self.clear_hits.get(sid, 0) + 1
