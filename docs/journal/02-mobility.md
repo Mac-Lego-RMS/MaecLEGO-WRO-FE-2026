@@ -489,7 +489,8 @@ The 37D 10:1 has the most torque and the finest encoder, but it weighs 190 g, ab
 The drivetrain is limited by traction, not by the motor.
 
 The 25GA370 leaves enough headroom for faster speed profiles: at 100 % PWM on 4S
-it reaches 1.72 m/s, more than twice the 0.75 m/s currently used on straights.
+the speed controller works with 1.65 m/s, more than twice the 0.75 m/s currently
+used on straights.
 
 ### Speed and acceleration
 
@@ -509,16 +510,20 @@ $$a_\text{traction} = \frac{\mu \cdot g \cdot l_f / L}{1 - \mu \cdot h / L}$$
 |---|---|---|
 | Theoretical top speed, 12 V | calculation | 1.68 m/s |
 | Theoretical top speed, 14.8 V, 100 % PWM | calculation | 2.07 m/s |
-| Measured top speed, 100 % PWM, 15.9 V | encoder log, full-throttle step (T07) | 1.72 m/s |
-| Time constant $\tau$ (63.2 %) | step response (T07) | 0.34 s |
-| Max. measured acceleration | step response (T07) | 4.6 m/s² |
+| Top speed at 100 % PWM used by the speed controller | speed calibration of the bridge (parameter `v_max`) | 1.65 m/s |
+| Top speed, 100 % PWM, 15.9 V | **estimate**, the full-throttle step (T07) is not yet measured | ≈ 1.72 m/s |
+| Time constant $\tau$ (63.2 %) | **estimate**, T07 not yet measured | ≈ 0.34 s |
+| Max. acceleration | **estimate**, T07 not yet measured | ≈ 4.6 m/s² |
 | Traction limit, rear-wheel drive | formula above with the measured CoG and $\mu_\text{long} = 1.18$ (T08, [Grip](#tires)) | ≈ 9 m/s² (6.7 m/s² with the lateral $\mu = 0.98$ as a lower bound) |
 | Deceleration after a halt command | fitted to the stopping distances of runs 38–42 ([chapter 3](04-software.md#obstacle-strategy)) | 0.57 m/s² |
 | Rolling resistance incl. drivetrain drag | $c_r = a/g$ | ≤ 0.058 (upper bound, it also contains the drag of gearbox and motor) |
 | Limiting factor at launch | wall test ([chapter 2](03-power-sensors.md#the-operating-envelope-is-bounded-by-traction-not-by-stall)) | traction |
 
-The measured acceleration stays below the traction limit, and the wall test
-shows the tires slipping long before the motor stalls. Stall torque and stall
+The estimated acceleration stays well below the traction limit, and the wall
+test shows the tires slipping long before the motor stalls. The full-throttle
+step (T07) that will replace the three estimates is prepared: the test script
+[`step_test.py`](../../src/esp_bridge/esp_bridge/step_test.py) and its export
+[`t07_export.py`](../analysis/t07_export.py) are in the repository. Stall torque and stall
 current were therefore not measured: they are never reached. The vehicle has no
 active brake; it coasts, and the controller triggers every halt early by the
 coasting distance ([chapter 3](04-software.md#obstacle-strategy)).
@@ -756,7 +761,7 @@ this chapter.
 | T01/T02 masses, axle loads, CoG | done without the body (01.10.); single masses only for the wheels, the camera and its holder | [Layout](#layout-in-four-levels) |
 | T04 encoder distance calibration | done: effective diameter 30.03 mm from 10 × 2.00 m | [Tires](#tires) |
 | T05 static wheel angles and play | done (01.10.): lock, Ackermann share, linearity; reversal play not measured | [Static wheel angles and play](#static-wheel-angles-and-play) |
-| T07 full-throttle step | top speed, $\tau$, acceleration | [Speed and acceleration](#speed-and-acceleration) |
+| T07 full-throttle step | open: top speed, $\tau$ and acceleration are estimates; test script and export ready | [Speed and acceleration](#speed-and-acceleration) |
 | T08 inclined board | done (02.10.): $\mu$ lateral and longitudinal, clean and after 3 runs, sliding and tipping limits; LEGO comparison not measured | [Tires](#tires) |
 | T12/T17 tire geometry and mass | done (01.10.): diameters, runout, 9 g per wheel; straight-line deviation | [Tires](#tires) |
 | T13 servo step | steering step time | [Steering speed](#steering-speed) |

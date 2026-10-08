@@ -102,6 +102,7 @@ Every change is checked on three levels.
 
 ```bash
 cd src/camera_lidar_fusion && python3 -m pytest test -q   # 56 tests: fisheye model, colours, blind sectors, white point
+cd src/esp_bridge && python3 -m pytest test -q            # 6 tests: Jetson-ESP protocol, encoding and decoding
 cd src/ekf/ekf && python3 test_unpark.py                  # unpark geometry; likewise the other test_*.py,
                                                           # some of which take a recorded bag as argument
 pip install -r docs/analysis/requirements.txt
