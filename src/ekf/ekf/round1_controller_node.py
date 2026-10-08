@@ -443,6 +443,11 @@ class Round1Controller(Node):
         'led_blink_colour': ('led_blink_colour', 'orange', str),
         'led_scan_colour':  ('led_scan_colour',  'red', str),
         'led_blink_dist':   ('led_blink_dist',   0.60, float),   # m before T_A
+        # Colour of ALL effects while the obstacle map is still being built
+        # (lap 1, unparking included). cam_47: the orange blinker and the red
+        # scan light tinted a green pylon at 58 deg left red -> stored as red.
+        # White ran all along before the LED upgrade and is known to be safe.
+        'led_lap1_colour':  ('led_lap1_colour',  'white', str),
         # Obstacle straights: v_obstacle only in zones around the pylons and
         # the lane changes, v_drive in between (cam_6: straights 1 and 2 with
         # pylons only at the start and the end ran at 0.55 all the way).
@@ -1291,7 +1296,10 @@ class Round1Controller(Node):
             return
         spec = {'left': self.led_left, 'right': self.led_right,
                 'front': self.led_front}[side]
-        colour = self.led_scan_colour if side == 'front' else self.led_blink_colour
+        if (self.corner_count // 4) < self.obs_freeze_lap:
+            colour = self.led_lap1_colour     # camera still deciding colours
+        else:
+            colour = self.led_scan_colour if side == 'front' else self.led_blink_colour
         n = max(1, int(math.ceil(seconds * 1000.0 / period_ms)))
         self.pub_pixel.publish(String(data='%s %s ms=%d x=%d' % (spec, colour, period_ms, n)))
 
