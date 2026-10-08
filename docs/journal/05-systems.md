@@ -93,6 +93,7 @@ Most of the software described in chapter 3 is a reaction to one of these rows.
 | Only the newest scan (queue depth 1) | process every scan | a late wall correction pulls the heading back in a corner | corrections were 0.35–0.6 s late, 30–50° heading in a 90°/s corner |
 | Colour per LiDAR point (fusion) | YOLOv11n on the camera image (national final) | lower latency; distance and colour in one measurement; camera and LiDAR use the same 240°, so a pixel exists for every LiDAR point | the old set-up no longer exists, so no direct latency comparison; field of view: 3 vs. 6 of 6 seats at the scan halt, 3 vs. 5 within the colour range (fov_coverage) |
 | Fisheye camera (240° used horizontally) | 120° CSI camera | sees the next straight before the corner | 3 vs. 6 of 6 seats at the scan halt, 3 vs. 5 within the colour range |
+| IMX219-200 fisheye on the CSI port (since October) | PiCam360 on USB (used until October), another USB fisheye | the USB camera dropped out and re-enumerated, and finally the PiCam360 failed; its USB plug and cable took a lot of space in the stack; its MJPEG stream had to be decoded by the CPU | 62 of 66 full obstacle runs parked within 2 cm; green read as red in at most 2 % of the points instead of 25 % at 1.4 m ([chapter 3](04-software.md#colour)) |
 | RPLIDAR S3 | STL-19P (used first), LakiBeam 1S | resolution, scan rate and range on the black walls; the LakiBeam is too large and needs Ethernet and a 12 V supply | comparison table in [chapter 2](03-power-sensors.md#lidar-selection) |
 | Colour limit 1.60 m | colour at any distance | beyond ~1.7 m red is read as green | test with a red pillar: 10/0 red/green votes at 1.2–1.6 m, 2/8 at 1.6–2.0 m, 0/16 beyond; pooled over 59 bags green is read as red for 25 % of its points at 1.4 m |
 | See-through clearing of seats | keep every seat once occupied | phantom pillars caused unnecessary lane changes | replayed on the failed bags with phantom pillars: removed them there |
@@ -168,11 +169,12 @@ The most important cycles across all subsystems:
 | Mechanics | C-profile knuckles cracked at the mounting holes | holes close to the outer wall | wall thickened (v54) |
 | Mechanics | front wheels slid out of their bearings | press fit only | retaining ring; no mechanical failure since |
 | Mechanics | once-per-revolution oscillation in the first circle drives | tyre moulds printed with an aligned seam | random seam, better rim centring; oscillation gone |
-| Mechanics | IMU pitch noise up to 3.4 °/s | gear on an improvised adapter | adapter repaired: −23 to −86 % pitch noise ([chapter 2](03-power-sensors.md#iteration-locating-and-removing-the-vibration-source)) |
+| Mechanics | IMU pitch noise up to 3.4 °/s | gear on an improvised adapter, then the adapter refitted tighter (−23 to −86 % pitch noise, but 4–20 % more friction) | a gear that fits the D-shaft directly: friction largely back, yaw noise −23 to −73 % ([chapter 2](03-power-sensors.md#iteration-locating-and-removing-the-vibration-source)) |
 | Electronics | the low-voltage warning would only fire at 3.21 V per cell | – | failed divider resistor found by comparing against the bench supply ([chapter 2](03-power-sensors.md#fault-found-and-fixed-the-divider-read-18--high)) |
 | Electronics | the 5 V protection reacted in seconds, with an undefined threshold | PTC and TVS diode (V3) | eFuse with defined limit and 6.1 V clamp (V5) |
 | Electronics | the eFuse limit (3.75 A) lay above the regulator's 3.5 A, so it could never act | first resistor value | limit lowered to 2.05 A, below the regulator and above the measured 5 V load of ≈0.7 A ([chapter 2](03-power-sensors.md#current-limit-corrected)) |
 | Electronics | a regulated 12 V motor rail on the board | 12 V rail for repeatable speed | rail removed: the encoder closes the speed loop |
+| Sensors | the camera dropped out during runs, and finally the PiCam360 failed | fixed device name via udev, watchdog that restarts the camera node | IMX219-200 on the CSI port with its own node; shading calibration against the colour cast at the image edge; colour thresholds re-tuned ([chapter 2](03-power-sensors.md#camera-swap-usb-to-csi)) |
 | Software | heading drift 25° | line fit per cluster | split at corners before the fit (±1.5°) |
 | Software | localisation lost after a blind stretch | gate from the EKF covariance | staged gate by scan count |
 | Software | pushed pillar matched to a wall end | overlap check removed (it blocked correct matches) | overlap check re-added with a tolerance that widens with the gate level |
@@ -186,6 +188,32 @@ The most important cycles across all subsystems:
 | Software | parking start pose 12 cm / 17° off | blind 55 cm ESP move | closed-loop approach |
 | Software | parking accuracy 6/8 → 2/7 | – | heading correction at the start pose (run 35), closed-loop reverse (run 38): 5/5, median 0.3 cm (chapter 3) |
 | Software | wrong unpark side with a green pillar in front | fixed pillar row | nearest pillar in front, filtered by its lateral position |
+
+### Example: replacing the camera
+
+The camera swap in October shows how one part touches every subsystem. The
+PiCam360 on USB had caused trouble for weeks: it dropped out and re-enumerated
+during runs, which needed a fixed device name and a watchdog, and its USB plug
+and cable took a lot of space in a stack that is otherwise built around every
+millimetre. When it failed, the replacement was chosen against all subsystems at
+once:
+
+- **Mechanics.** A CSI camera connects with a flat ribbon cable instead of a USB
+  plug, which frees the space the plug took in the stack.
+- **Electronics.** The Jetson's CSI port is otherwise unused; nothing on the main
+  PCB had to change.
+- **Software.** A new node publishes the image on the same topic as before, so
+  the fusion stayed unchanged. The image path runs in the Jetson's own hardware,
+  so the CPU no longer decodes MJPEG — CPU load was the tightest resource
+  (next example).
+- **Perception.** A new lens means new colours: the cast at the image edge was
+  measured with a white sheet over the lens and corrected, and the colour
+  thresholds were tuned again on recorded runs.
+
+The new camera was then tested in two series on 7 and 8 October: 18 runs with
+virtual pillars, to separate driving from perception, and 66 full obstacle runs
+with real pillars and the CSI camera. 62 of the 66 parked within 2 cm, and green
+pillars were read as red far less often than before (chapter 3).
 
 ### Example: the CPU load
 
