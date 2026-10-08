@@ -1,5 +1,25 @@
 # MäcLEGO — WRO Future Engineers 2026
 
+<p align="center">
+  <img src="https://img.shields.io/badge/Competition-WRO%20Future%20Engineers-FF6B00?style=for-the-badge" alt="WRO Future Engineers">
+  <img src="https://img.shields.io/badge/ROS%202-Humble-22314E?style=for-the-badge&logo=ros&logoColor=white" alt="ROS 2 Humble">
+  <img src="https://img.shields.io/badge/Python-3.10-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.10">
+  <img src="https://img.shields.io/badge/C++-ESP32%20Firmware-00599C?style=for-the-badge&logo=cplusplus&logoColor=white" alt="C++">
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/NVIDIA-Jetson%20Orin%20Nano-76B900?style=flat-square&logo=nvidia&logoColor=white" alt="Jetson Orin Nano">
+  <img src="https://img.shields.io/badge/ESP32--S3-Real--Time%20Control-E7352C?style=flat-square&logo=espressif&logoColor=white" alt="ESP32-S3">
+  <img src="https://img.shields.io/badge/LiDAR-RPLIDAR%20S3-6E4AFF?style=flat-square" alt="RPLIDAR S3">
+  <img src="https://img.shields.io/badge/Camera-IMX219%20fisheye%20(CSI)-00A3E0?style=flat-square" alt="IMX219 fisheye">
+  <img src="https://img.shields.io/badge/Localisation-EKF-2A78D6?style=flat-square" alt="EKF">
+  <img src="https://img.shields.io/badge/PCB-KiCad-314CB0?style=flat-square&logo=kicad&logoColor=white" alt="KiCad">
+  <img src="https://img.shields.io/badge/Firmware-PlatformIO-F5822A?style=flat-square&logo=platformio&logoColor=white" alt="PlatformIO">
+  <img src="https://img.shields.io/badge/Build-colcon-blue?style=flat-square" alt="colcon">
+  <img src="https://img.shields.io/badge/Viz-Foxglove-FB6E2E?style=flat-square" alt="Foxglove">
+  <a href="https://github.com/Mac-Lego-RMS/MaecLEGO-WRO-FE-2026/actions/workflows/journal.yml"><img src="https://github.com/Mac-Lego-RMS/MaecLEGO-WRO-FE-2026/actions/workflows/journal.yml/badge.svg" alt="Engineering journal build"></a>
+</p>
+
 Team MäcLEGO, Rabanus-Maurus-Schule Fulda, Germany.
 
 This repository holds everything behind our self-driving vehicle for the WRO
