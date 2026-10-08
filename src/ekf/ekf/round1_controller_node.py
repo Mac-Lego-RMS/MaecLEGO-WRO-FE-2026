@@ -789,6 +789,14 @@ class Round1Controller(Node):
         # only really steep (late) dodges are capped now
         'steep_path_from':          ('steep_path_from',          0.85, float),   # lat per long
         'v_steep_path':             ('v_steep_path',             0.35, float),
+        # Pylon right behind the corner exit (cam_50, #14: 0.55 m after the
+        # turn, seen during the turn): the exit acceleration took it from 0.30
+        # to 0.65 and the S-curve ran at 0.45 with full lock -- very tight.
+        # A pylon of the next straight closer than dodge_after_turn_dist to
+        # the corner exit: no exit acceleration, and v_dodge_after_turn until
+        # it is passed. 0 = off.
+        'v_dodge_after_turn':       ('v_dodge_after_turn',       0.30, float),
+        'dodge_after_turn_dist':    ('dodge_after_turn_dist',    1.00, float),
         # Pace profile (PACE_PROFILES), 'custom' = individual values. pace_lap1:
         # own profile for the scan lap, 'same' = like pace.
         'pace':                     ('pace',                     'custom', str),
@@ -6189,7 +6197,45 @@ class Round1Controller(Node):
             if self.obs_zone_speed:
                 v_cap = self._obs_zone_cap(x, y, v_cap)
             v = min(v, v_cap)
+        if self._dodge_after_turn(x, y):
+            v = min(v, self.v_dodge_after_turn)
+            if getattr(self, "_dodge_logged", None) != self.corner_count:
+                self._dodge_logged = self.corner_count
+                self.get_logger().info(
+                    f"Pylon close behind corner {self.corner_count} with a lane change "
+                    f"(slope {self.obs_max_slope:.2f}) -- v <= {self.v_dodge_after_turn:.2f} until passed.")
         self.publish_cmd(v, omega)
+
+    def _dodge_pylon_near(self, wall, ref, travel, x, y):
+        """Is there a pylon of `wall` less than dodge_after_turn_dist ahead of
+        `ref` (along `travel`) that the car at (x, y) has not passed yet?"""
+        d_max = self.dodge_after_turn_dist
+        car = (x - ref[0]) * travel[0] + (y - ref[1]) * travel[1]
+        for o in (self.obstacles or []):
+            if o['wall'] != wall:
+                continue
+            a = (o['x'] - ref[0]) * travel[0] + (o['y'] - ref[1]) * travel[1]
+            if -0.2 < a < d_max and car < a + 0.05:
+                return True
+        return False
+
+    def _dodge_after_turn(self, x, y):
+        """DRIVE: pylon close behind the corner just driven, not yet passed."""
+        if self.v_dodge_after_turn <= 0.0 or self.corner_count < 1 or self.arc is None:
+            return False
+        # only with a real lane change: passing on the side it exits on is easy
+        if not self.obs_path or getattr(self, "obs_max_slope", 0.0) < self.obs_slope_slow:
+            return False
+        return self._dodge_pylon_near(self._entry_wall_idx(self.corner_idx),
+                                      self.drive_start_xy, self.arc['travel'], x, y)
+
+    def _dodge_after_this_turn(self):
+        """TURN: does the exit straight have a pylon close behind the exit?"""
+        if self.v_dodge_after_turn <= 0.0 or self.arc is None:
+            return False
+        tb, th = self.arc['T_B'], self.arc['theta_target']
+        return self._dodge_pylon_near(self._exit_wall_idx(self.corner_idx), tb,
+                                      (math.cos(th), math.sin(th)), tb[0], tb[1])
 
     def _obs_zones(self):
         """Slow zones of the current obstacle path as (lo, hi) in distance to
@@ -6263,7 +6309,8 @@ class Round1Controller(Node):
         # speed: v_turn, rising towards v_drive at the end of the corner
         v_cmd = self._v_turn_eff()
         if (self.turn_exit_accel_deg > 0.0 and self.v_drive > self.v_turn
-                and not self._finish_straight_next()):
+                and not self._finish_straight_next()
+                and not self._dodge_after_this_turn()):
             lim = math.radians(self.turn_exit_accel_deg)
             if abs(theta_err) < lim:
                 f = 1.0 - abs(theta_err) / lim
