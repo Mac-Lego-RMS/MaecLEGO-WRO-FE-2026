@@ -172,7 +172,7 @@ $z$ up.
 |---|---|---|---|
 | LiDAR | InnoMaker STL-19P, scan plane $z \approx 60$ mm | Slamtec RPLIDAR S3, $x \approx 111$ mm, scan plane $z \approx 55$ mm | screwed to the monocoque, no isolation |
 | Usable LiDAR field of view | ≈250° | 240° | the main PCB blocks the rear (measured from −33° to +59° around the rear); the software cuts ±60° |
-| Camera | directional CSI camera, $z = 80$ mm | PiCam360 fisheye (197° lens, facing the ceiling), directly above the LiDAR | held by the body; separate holder without body |
+| Camera | directional CSI camera, $z = 80$ mm | IMX219-200 fisheye on CSI (200° lens, facing the ceiling; until October a PiCam360 on USB), directly above the LiDAR | held by the body; separate holder without body |
 | IMU | BNO055 near the rear axle | BNO055 above the rear-axle centre ($x \approx 0$ mm, $z \approx 5$ mm) | screwed to the base plate |
 
 The LiDAR sits lower than before, which keeps the offset to the camera small. The

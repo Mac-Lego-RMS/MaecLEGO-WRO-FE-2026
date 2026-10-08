@@ -20,7 +20,7 @@ plugs directly onto the Jetson.
 |---|---|
 | Compute | NVIDIA Jetson Orin Nano (ROS 2 Humble, Python) + ESP32-S3 (C++, PlatformIO) |
 | Main PCB | own 4-layer board, V5: power path, motor driver, servo interface, LiDAR USB bridge |
-| Sensors | Slamtec RPLIDAR S3 at 15 Hz · PiCam360 fisheye · Bosch BNO055 · Hall wheel encoder |
+| Sensors | Slamtec RPLIDAR S3 at 15 Hz · Waveshare IMX219-200 fisheye on CSI (until October a PiCam360 on USB) · Bosch BNO055 · Hall wheel encoder |
 | Actuators | 12 V gear motor on a VNH5019 H-bridge · Waveshare SC09 serial steering servo |
 | Power | 4S LiPo, 450 mAh for races, 1150 mAh for testing; two inputs, hot-swappable |
 | Localisation | EKF on gyro, encoder and walls matched to the field map |

@@ -726,7 +726,7 @@ actuation.** No sensor used for perception is routed through the microcontroller
 | Sensor | Task | Rate | Interface | Position |
 | --- | --- | --- | --- | --- |
 | Slamtec RPLIDAR S3 | walls, pillars, localisation | 15 Hz, ≈2 520 points per scan | UART 1 Mbaud → on-board CP2102N → USB | front, centred on the front axle, ≈7 cm ahead of the vehicle centre; scan plane 55 mm above the floor |
-| PiCam360 fisheye, 197° calibrated | colour of the pillars | 15 fps, 1280 × 960 | USB | above the LiDAR, lens facing the ceiling |
+| Waveshare IMX219-200 fisheye, 200° (208° calibrated); until October a PiCam360 | colour of the pillars | 15 fps, 1280 × 960 | CSI (PiCam360: USB) | above the LiDAR, lens facing the ceiling |
 | Bosch BNO055 | yaw rate for the EKF | 100 Hz | I²C to the Jetson | on the rear axle |
 | Hall encoder | wheel speed and distance | 408 counts per wheel revolution | ESP32, IO15/IO16 | on the drive motor |
 | Voltage and current sense | battery and motor telemetry | telemetry rate | ESP32 ADC, IO1/IO8 | on the board |
@@ -835,38 +835,86 @@ sensor appears to the Jetson as an ordinary USB serial device (consumed by
 
 ### Camera
 
-A **PiCam360** fisheye facing the ceiling, so one image covers the full circle
-around the vehicle. The lens sits 27 mm above the scan plane, at about 82 mm —
-below the top of the walls and the pillars. The data sheet states a 270° opening
-angle; calibrated on the vehicle, the lens model gives an effective **197°**
-([Calibration](#calibration)), so the view reaches 8.5° below the horizon. The
-scan plane, 27 mm below the lens, is therefore in view from
+A fisheye camera facing the ceiling, so one image covers the full circle around
+the vehicle. It sits above the LiDAR, below the top of the walls and the
+pillars. Since October this is a **Waveshare IMX219-200** on the Jetson's CSI
+port, with a 200° lens; until then a **PiCam360** on USB did the same job. Why
+it was replaced and what the swap needed is described under
+[Camera swap: USB to CSI](#camera-swap-usb-to-csi).
+
+Calibrated on the vehicle, the lens model of the IMX219-200 gives an effective
+**208°** (focal length 312 px per radian, image circle of 567 px radius;
+[Calibration](#calibration)), so the view reaches 14° below the horizon. The lens
+sits 30 mm above the scan plane, which is therefore in view from
 
 $$
-d_\mathrm{min} = \frac{27\,\mathrm{mm}}{\tan 8.5^\circ} \approx 0.18\,\mathrm{m}
+d_\mathrm{min} = \frac{30\,\mathrm{mm}}{\tan 14^\circ} \approx 0.12\,\mathrm{m}
 $$
 
-outwards — close to the 0.15 m below which the software ignores LiDAR points
-anyway, so practically every LiDAR point can be given a colour.
+outwards — inside the 0.15 m below which the software ignores LiDAR points
+anyway, so every LiDAR point can be given a colour. The PiCam360, with an
+effective 197° and its lens 27 mm above the scan plane, reached down to 0.18 m.
 
-**Why this camera.** The comparison against the previous 120° camera — which
-seats of the next straight are visible before a corner — is in
-[chapter 3](04-software.md). A CSI camera with this field of view exists only for
-the Raspberry Pi, which made USB the only option.
+**Why a fisheye.** The comparison against the previous 120° camera — which seats
+of the next straight are visible before a corner — is in
+[chapter 3](04-software.md).
 
 **Why no neural network.** The first vehicle detected pillars with a YOLO model:
 about 200 ms from image to result. The current pipeline projects every LiDAR
 point into the image and reads its colour, in 10–20 ms. Every pillar then has a
 distance and a colour at the same time.
 
-**Light.** Exposure, gain and white balance are measured on the field mat with
-`camera_exposure_calib` and applied at start-up; the current values are 30 ms,
-gain 0 and 5 329 K ([`config/camera_calib.env`](../../config/camera_calib.env)).
-Fixed values in `src/start_robot.sh` (50 ms, gain 20, 4 600 K) are the fall-back.
-Automatic exposure is never used: with it the colour detection fell apart
-whenever the camera re-enumerated. The setting is deliberately bright, because
-green pillars otherwise sink towards black; direct sunlight remains the camera's
-weak spot for the same reason.
+**Light.** Exposure, gain and white balance are fixed, never automatic: automatic
+exposure follows the windows and lamps, and the colour detection needs the same
+colours at every start. The CSI camera runs with 20 ms exposure and gain 8, its
+own white balance switched off; the colour is corrected by a measured shading
+table instead (below). The PiCam360 used values measured on the field mat with
+`camera_exposure_calib` ([`config/camera_calib.env`](../../config/camera_calib.env)).
+The setting is deliberately bright, because green pillars otherwise sink towards
+black; direct sunlight remains the camera's weak spot for the same reason.
+
+#### Camera swap: USB to CSI
+
+In October the PiCam360 failed. It was replaced by the IMX219-200 on the CSI
+port rather than by another USB camera, for three reasons:
+
+- **Reliability.** The USB camera re-enumerated during operation and moved
+  between `/dev/video0` and `/dev/video1`; it needed a fixed device name through
+  a udev rule and a watchdog that restarted the camera node. A CSI camera sits
+  on a ribbon cable and cannot disappear from the bus.
+- **CPU.** The USB camera delivered MJPEG, which the CPU had to decode for every
+  frame. On the CSI path the whole image pipeline stays in the Jetson's own
+  hardware (image signal processor and video image compositor); the CPU only
+  publishes the finished image. CPU load is the tightest resource of the vehicle
+  ([chapter 4](05-systems.md)).
+- **Field of view.** 200° against 197° effective: the camera sees at least as
+  much as before.
+
+A new node, [`csi_camera.py`](../../src/camera_lidar_fusion/camera_lidar_fusion/csi_camera.py),
+reads the camera and publishes on the same topic, with the same encoding and
+frame as before, so the fusion did not change. It reads the whole sensor
+(1640 × 1232, binned 2 × 2), because the 200° image circle needs all of it.
+
+The swap was not plug and play. The IMX219-200 shows a strong colour cast towards
+the edge of the image — exactly where the pillars appear. The cast was measured
+with [`csi_shading_calib.py`](../../src/csi_shading_calib.py): a sheet of white
+paper laid over the lens makes every pixel see the same white, and the tool fits
+the ratios red/green and blue/green, and the brightness, per ring of the image.
+The camera node applies this table to every frame (`config/csi_shading.npz`).
+
+![The IMX219-200 before (left) and after (right) the shading calibration. Before, the edge of the image, where the pillars appear, had a strong green and blue cast.](../figures/camera_csi_shading.jpg)
+
+The colour thresholds of the fusion were then tuned again on recorded runs.
+Green pillars appear pale from about 0.8 m on, so the minimum saturation for red
+and green was lowered from 60 to 40: a green pillar at 0.8–1.4 m is now
+recognised in 53 % of the frames instead of 41 %. With the shading table the
+black wall band tips slightly towards red, so red got its own, stricter gate:
+in the same pillar layout the wrong red points dropped from about 2 140 to 345,
+and green pillars were read 98–100 % green instead of 37–94 %. The white-point
+correction of the PiCam360 was switched off; with the CSI lens its reference ring
+would have measured the walls instead of the mat.
+
+![Green pillars before (left) and after (right) the green correction.](../figures/camera_csi_green.jpg)
 
 ### IMU
 
@@ -1147,8 +1195,8 @@ The fusion reads the colour of every LiDAR point from the fisheye image, so the
 geometry between the two sensors decides whether a pillar gets its own colour or
 the colour of the wall behind it. The lens model alone was not good enough: it is
 strictly equidistant ($r = f\theta$), and towards the edge of the image — exactly
-where the pillars appear — real fisheye lenses deviate from it by 9 to 12 px on
-our camera. Computing the top edge of the wall band from the model gave three
+where the pillars appear — real fisheye lenses deviate from it, by 9 to 12 px on
+the PiCam360. Computing the top edge of the wall band from the model gave three
 different heights for the same edge at 0.5, 1.0 and 2.5 m.
 
 The calibration is therefore **measured**, with the tool
@@ -1161,17 +1209,17 @@ The calibration is therefore **measured**, with the tool
    measure over which image radius the pillar colour appears;
 3. fit the sampling zone through these points and save it.
 
-The focal length is checked the same way. The 270° opening angle is only the
-product description; fitted to a pillar sampled at several distances, the lens
-model gives an effective 197°. Taken from the data sheet, the horizon ring would
-sit about 110 px too far inside the image — above the pillars instead of on
-them. The result is stored in
+The focal length is checked the same way. For the PiCam360 the 270° of the
+product description became an effective 197° when fitted to a pillar sampled at
+several distances; taken from the data sheet, the horizon ring would have sat
+about 110 px too far inside the image — above the pillars instead of on them.
+The IMX219-200 is specified with 200°; the same fit gives 208°. The result is stored in
 [`config/fisheye_calib.yaml`](../../config/fisheye_calib.yaml), which the fusion
 loads at start-up. The full procedure is in
 [`src/camera_lidar_fusion/README.md`](../../src/camera_lidar_fusion/README.md).
 
-Exposure, gain and white balance are measured on the field mat — see
-[Camera](#camera).
+Exposure, gain and white balance, and for the CSI camera its colour shading,
+are described under [Camera](#camera).
 
 ### Steering and gyro
 

@@ -283,7 +283,8 @@ is switched to the full field at the latest 0.40 m before the front wall.
 
 [`lidar_pixel_mapper.py`](../../src/camera_lidar_fusion/camera_lidar_fusion/lidar_pixel_mapper.py):
 the fisheye camera sits above the LiDAR with its lens facing the ceiling
-(opening angle 197°, calibrated; see chapter 2). At the rear a circuit board
+(since October a Waveshare IMX219-200 on the CSI port, 208° calibrated; before
+that a PiCam360 on USB, 197°; see chapter 2). At the rear a circuit board
 blocks the view of the LiDAR and the camera alike (measured from −33° to +59°
 around the rear). The software cuts this sector symmetrically at ±60° and uses
 only the front 240° for walls, pillars and colour. Instead of detecting

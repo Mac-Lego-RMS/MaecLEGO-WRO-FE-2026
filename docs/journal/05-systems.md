@@ -134,7 +134,7 @@ complete versions. The table compares them subsystem by subsystem.
 | Drive | Pololu 20D 31:1 on a LEGO differential, no encoder (before: Pololu 25:1) | 25GA370 with Hall encoder, lengthways, brass bevel gears 1:1, rigid axle | closed speed loop; motor with encoder had to fit ([chapter 1](02-mobility.md#motor-selection)) |
 | Wheels | LEGO Spike, 67 mm | cast silicone tyres on PA6-CF rims, 32 mm | grip, lower vehicle ([chapter 1](02-mobility.md#tires)) |
 | Electronics | Jetson developer kit; motor, servo and LiDAR drivers separate from the main PCB | Jetson module on the A603 carrier; main PCB V5 as a stack with power path, motor driver, servo interface and LiDAR bridge; no 12 V rail | size, cabling, protection ([chapter 2](03-power-sensors.md#design-evolution)) |
-| Sensors | STL-19P LiDAR (≈250° usable), 120° CSI camera, BNO055 | RPLIDAR S3 (240° used), fisheye camera above the LiDAR, BNO055, wheel encoder | scan rate and range on the black walls; see the next straight before the corner ([chapter 2](03-power-sensors.md#sensors-selection-and-placement)) |
+| Sensors | STL-19P LiDAR (≈250° usable), 120° CSI camera, BNO055 | RPLIDAR S3 (240° used), fisheye camera above the LiDAR (IMX219-200 on CSI since October), BNO055, wheel encoder | scan rate and range on the black walls; see the next straight before the corner ([chapter 2](03-power-sensors.md#sensors-selection-and-placement)) |
 | Software | LiDAR wall follower (PID), YOLOv11n, IMU turn counting | EKF on a map of the field, colour per LiDAR point, Stanley and arc control, state machines | a pose from every single scan failed on one bad scan; ties are broken by time ([chapter 3](04-software.md)) |
 | Result | full driving score, 29/30 documentation, 4th place on time | 71 recorded test runs: 17/22 races finished; parking 13/45 within 2 cm overall, 5/5 in runs 35–46 ([chapter 3](04-software.md#results-over-all-test-runs)) | the task is harder now: the German rules place exactly one pillar per straight and make parking an optional extra task without a parallel requirement; the international rules place up to two pillars per straight and require parallel parking after the three laps |
 
@@ -226,7 +226,7 @@ Only one run was recorded after the change; the temperature stayed uncritical
 | ESP keeps its last position target | after the next reset it drives back towards the old target | – | the controller sends motor 0 after parking |
 | Last park move against the wall | pushes until the ESP timeout (4 s), costs time | move acknowledgement with status | forward moves 1.5 cm shorter; per-move correction |
 | Battery voltage not measured | the reported value is a constant 17.518 V in all bags; a link between charge and failures cannot be checked | – | see chapter 2 |
-| Camera re-enumerates on USB | no colour | – | fixed device name via udev |
+| Camera re-enumerates on USB | no colour | – | fixed device name via udev and a camera watchdog; since October a CSI camera on a ribbon cable, which cannot drop off the bus |
 | ESP reboot / clock jump | wrong time stamps | time sync detects the reboot | resync |
 | Wall contact | robot pushes against the wall | LiDAR < 4 cm in front | stop, back up and re-plan; at most two manoeuvres per corner, then emergency stop |
 | Front wheel slides off its axle | wheel lost, run over | – | retaining ring; no such failure since it was added |
