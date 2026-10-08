@@ -433,6 +433,16 @@ class Round1Controller(Node):
         # m/s, rolled 31 cm, stood at 1.4 m instead of 1.85 m -- the green
         # then needed a steep late dodge (1.2-1.8). 0 = off.
         'v_lookahead_exit': ('v_lookahead_exit', 0.30, float),
+        # LED effects (9 LEDs: 0-2 left, 3-5 front, 6-8 right; firmware modes
+        # sweep/sweepr/scan). Sent as one-shots (x=..), so the status colour
+        # underneath (green/white/rainbow) comes back by itself. 0 = off.
+        'led_effects':      ('led_effects',      1.0, lambda v: bool(float(v))),
+        'led_left':         ('led_left',         '0-2: sweep', str),
+        'led_right':        ('led_right',        '6-8: sweepr', str),
+        'led_front':        ('led_front',        '3-5: scan', str),
+        'led_blink_colour': ('led_blink_colour', 'orange', str),
+        'led_scan_colour':  ('led_scan_colour',  'red', str),
+        'led_blink_dist':   ('led_blink_dist',   0.60, float),   # m before T_A
         # Obstacle straights: v_obstacle only in zones around the pylons and
         # the lane changes, v_drive in between (cam_6: straights 1 and 2 with
         # pylons only at the start and the end ran at 0.55 all the way).
@@ -1273,6 +1283,21 @@ class Round1Controller(Node):
             return
         self.led_phase = phase
         self.pub_pixel.publish(String(data=text))
+
+    def _led_effect(self, side, seconds, period_ms):
+        """One-shot animation on one side ('left'/'right'/'front') for about
+        `seconds`. Over the status colour, which comes back by itself."""
+        if not self.led_effects:
+            return
+        spec = {'left': self.led_left, 'right': self.led_right,
+                'front': self.led_front}[side]
+        colour = self.led_scan_colour if side == 'front' else self.led_blink_colour
+        n = max(1, int(math.ceil(seconds * 1000.0 / period_ms)))
+        self.pub_pixel.publish(String(data='%s %s ms=%d x=%d' % (spec, colour, period_ms, n)))
+
+    def _led_turn_side(self):
+        """Side the car turns to in the corners: CW right, CCW left."""
+        return 'left' if self.race_direction == 'CCW' else 'right'
 
     def _corner_msg_type(self):
         from robot_msgs.msg import CornerGeometry
@@ -2868,6 +2893,7 @@ class Round1Controller(Node):
 
         self.unpark_steps_run = mirror_steps(table, open_left)
         self.unpark_direction = direction
+        self._led_effect('left' if open_left else 'right', 6.0, 700)
         # ALWAYS remember the NORMAL sequence: parking uses its reversal,
         # even if the inner sequence is driven in a moment.
         self.unpark_steps_std = list(self.unpark_steps_run)
@@ -4002,6 +4028,7 @@ class Round1Controller(Node):
         self.park_avg_poses = []
 
     def _park_start_sequence(self):
+        self._led_effect('left' if self.unpark_direction == 'CW' else 'right', 8.0, 700)
         if getattr(self, 'park_corr_applied', False):
             self._park_start_moves(list(self.park_in_steps), 'in')   # already corrected
             return
@@ -5627,6 +5654,9 @@ class Round1Controller(Node):
         the new T_A already lies behind us.
         """
         self.publish_stop()
+        if getattr(self, '_led_scan_t0', None) != self.scan_pause_t0:
+            self._led_scan_t0 = self.scan_pause_t0
+            self._led_effect('front', self.scan_hold_duration, 600)
         remaining = self.scan_hold_duration - (self.now_s() - self.scan_pause_t0)
         if remaining > 0.0:
             self.get_logger().info(
@@ -5876,6 +5906,13 @@ class Round1Controller(Node):
         to_TA = (tA[0] - x) * tr[0] + (tA[1] - y) * tr[1]
         px, py = -tr[1], tr[0]
         lateral = abs((x - tA[0]) * px + (y - tA[1]) * py)
+        # indicator before the corner (not before the stop at the finish)
+        if (self.led_effects and self.corner_count < self.n_corners
+                and getattr(self, '_led_blinked_corner', -1) != self.corner_count
+                and 0.0 < to_TA < self.led_blink_dist
+                and self.state == 'DRIVE'):
+            self._led_blinked_corner = self.corner_count
+            self._led_effect(self._led_turn_side(), 3.0, 700)
         # distance travelled since the corner start (for the accel ramp)
         dsc = math.hypot(x - self.drive_start_xy[0], y - self.drive_start_xy[1])
 
