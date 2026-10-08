@@ -140,6 +140,12 @@ SEAT_CLEAR_MAX_DIST = 1.20
 SEAT_CLEAR_MARGIN = 0.05
 SEAT_CLEAR_MAX_YAWRATE = 0.5   # rad/s
 SEAT_CLEAR_MIN_RANGE = 0.12    # closer: own chassis, not an occluder
+# Never release a seat the LiDAR has hit this often: then something really
+# stands there, only beside the seat centre (pose error / placement), and the
+# beams past it are no proof. cam_43: green #13 stood ~6 cm off its seat,
+# 10 hits / 20 see-throughs -> released 1 s before the scan hold, re-entered
+# too late, knocked over.
+SEAT_CLEAR_MAX_HITS = 2
 # Count colour only with a steady heading, occupancy always. While turning,
 # image and scan do not match (offset up to ~0.5 s): parken_test_42, red #17
 # from 0.3-0.5 m at 1.5-1.75 rad/s five times GREEN, otherwise always red --
@@ -1297,6 +1303,7 @@ class ScanProcessor(Node):
             self.clear_run[sid] = self.clear_run.get(sid, 0) + 1
             self.clear_through[sid] = self.clear_through.get(sid, 0) + 1
             if (self.clear_run[sid] >= SEAT_CLEAR_SCANS
+                    and self.clear_hits.get(sid, 0) <= SEAT_CLEAR_MAX_HITS
                     and self.clear_through[sid] >= 2 * self.clear_hits.get(sid, 0)):
                 freed.append((sid, d))
         if not freed:
