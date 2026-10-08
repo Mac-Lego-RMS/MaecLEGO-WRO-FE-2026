@@ -364,6 +364,8 @@ class ScanProcessor(Node):
         self.test_pose_field = None  # field pose at the start on the straight
         self.straight_votes = []
         self.bay_votes = []          # (race_dir, front_d, d_inner) per scan
+        self.bay_vote_poses = []     # odom pose of each vote (see _bay_start_step)
+        self.bay_moved_warned = False
         self.bay_votes_inner_end = 0 # of them from the inner wall end
         self._front_src = None
         self.bay_pose_field = None   # field pose of the robot, measured in the bay
@@ -1725,7 +1727,7 @@ class ScanProcessor(Node):
                 clusters.append(np.array(cur)); cur = []
             cur.append(p)
         clusters.append(np.array(cur))
-        fronts = []
+        fronts, clamps = [], []
         for cl in clusters:
             if len(cl) < 3 or np.hypot(*(cl.max(axis=0) - cl.min(axis=0))) > PYLON_MAX_EXTENT:
                 continue
@@ -1746,6 +1748,20 @@ class ScanProcessor(Node):
                 f = along(*m) + row + PYLON_SEAT_CORR
                 if lo - 0.08 <= f <= hi + 0.08 and f >= FRONT_MIN_DIST:
                     fronts.append(min(max(f, lo), hi))
+                    clamps.append(abs(f - fronts[-1]))
+        # Two rows fit, but one only after clamping it 5-7 cm into [lo, hi]
+        # (cam_47/51/57: 1.16-1.17 inside, 1.59-1.62 = hi; the true front was
+        # 1.16-1.17 every time) -- take the row that fits without clamping.
+        if fronts and max(fronts) - min(fronts) > 0.03:
+            exact = [f for f, cl in zip(fronts, clamps) if cl < 0.01]
+            rest = [cl for cl in clamps if cl >= 0.01]
+            if (exact and rest and min(rest) >= 0.03
+                    and max(exact) - min(exact) <= 0.03):
+                self.get_logger().info(
+                    f'bay: pylon seat rows {", ".join("%.2f" % f for f in fronts)} -- '
+                    f'taking {np.mean(exact):.2f}, the other row only fits clamped '
+                    f'by {100 * min(rest):.0f}+ cm', throttle_duration_sec=5.0)
+                fronts = exact
         if not fronts or max(fronts) - min(fronts) > 0.03:
             if fronts:
                 self.get_logger().warn(
@@ -1880,24 +1896,48 @@ class ScanProcessor(Node):
         """Vote at standstill in the bay, then build map, direction and seat
         grid in one go."""
         self._front_src = None
-        v = self._bay_vote(measured)
-        if v is not None:
-            self.bay_votes.append(v)
-            if self._front_src == 'inner_end':
-                self.bay_votes_inner_end += 1
-        # The inner wall end scatters more than the front wall itself and has
-        # one-sided outliers (end found 3-6 cm short when a few beams at the
-        # end drop out: only_parken_14 1096/1114 mm among ~1152). With the
-        # MEAN of 5 votes the result moved by up to 2.8 cm depending on the
-        # window. Hence median, and more votes when that end is used.
-        need = BAY_VOTES_INNER_END if self.bay_votes_inner_end else START_VOTES
-        if len(self.bay_votes) < need:
-            return
+        # Only votes at STANDSTILL count. The field pose below assumes the
+        # robot stands as it stood for the votes, heading along the straight.
+        # cam_51/57: the bay stayed undecided (pylon seat ambiguous), the
+        # controller unparked after its 3 s timeout, and the votes taken in
+        # unpark move 2 (8 cm back, 23 deg turned) decided it: map 23 deg
+        # rotated, front 4 cm off -> park start 4-5 cm too far ahead, and
+        # the green pylon ahead of the bay counted as behind the car (wrong
+        # unpark side). Once it has moved, decide from the standstill votes.
+        px, py, pth = self.pose
+        moved = (float(np.hypot(px, py)) > BAY_MOVE_DIST
+                 or abs(float(wrap(pth))) > BAY_MOVE_ANGLE)
+        late = moved and bool(self.bay_votes)
+        if late:
+            need = len(self.bay_votes)
+            if not self.bay_moved_warned:
+                self.bay_moved_warned = True
+                self.get_logger().warn(
+                    f'bay: the robot moved off before the start was decided -- '
+                    f'deciding from the {need} vote(s) taken at standstill')
+        else:
+            v = self._bay_vote(measured)
+            if v is not None:
+                self.bay_votes.append(v)
+                self.bay_vote_poses.append(self.pose)
+                if self._front_src == 'inner_end':
+                    self.bay_votes_inner_end += 1
+            # The inner wall end scatters more than the front wall itself and has
+            # one-sided outliers (end found 3-6 cm short when a few beams at the
+            # end drop out: only_parken_14 1096/1114 mm among ~1152). With the
+            # MEAN of 5 votes the result moved by up to 2.8 cm depending on the
+            # window. Hence median, and more votes when that end is used.
+            need = BAY_VOTES_INNER_END if self.bay_votes_inner_end else START_VOTES
+            if len(self.bay_votes) < need:
+                return
 
         race_dir, n = Counter(b[0] for b in self.bay_votes).most_common(1)[0]
+        if late:
+            need = n                 # majority of what was seen standing
         if n < need:
             # no agreement -- do not decide yet, keep collecting
             self.bay_votes = self.bay_votes[-need:]
+            self.bay_vote_poses = self.bay_vote_poses[-need:]
             return
         win = [b for b in self.bay_votes if b[0] == race_dir]
         front_d = float(np.median([b[1] for b in win]))
@@ -1914,7 +1954,9 @@ class ScanProcessor(Node):
 
         self.position = 'bay'
         self.lane_width = 1.0
-        self.commit_pose = self.pose
+        # anchored at the pose the votes were taken at (standstill), not the
+        # current one -- identical in the normal case
+        self.commit_pose = self.bay_vote_poses[-1] if self.bay_vote_poses else self.pose
         xf, yf, thf = self.bay_pose_field
         self.get_logger().info(
             f'[obstacle] start from the parking bay: {race_dir}, '
