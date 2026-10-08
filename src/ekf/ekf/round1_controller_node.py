@@ -687,7 +687,8 @@ class Round1Controller(Node):
         # the start (CW with a pylon: the front came from a kinked piece of
         # wall, park start 2-4 cm too far back, only_parken_85/87).
         # park_offset_long_* does NOT apply then. 0 = off.
-        'park_face_dist_cw':        ('park_face_dist_cw',        0.090, float),
+        # cam_34-36: start 2 cm too far ahead of the bay every time -> 0.090 -> 0.070
+        'park_face_dist_cw':        ('park_face_dist_cw',        0.070, float),
         'park_face_dist_ccw':       ('park_face_dist_ccw',       0.0, float),
         # CCW re-measured 04.10. (only_parken_1-4: 31.3-33.3 long, 14.2-16.8
         # lat) -- they matter now that the outer sequence is the default
@@ -730,7 +731,8 @@ class Round1Controller(Node):
         # +1.5..+2.6 cm ahead of the map start with -0.025 (cam_3-10); in
         # cam_13 the face window passed during the last corner (4 scans), the
         # map start with -0.025 applied -> ~2.2 cm too far back. -> -0.003.
-        'park_offset_long_cw':      ('park_offset_long_cw',      -0.003, float),
+        # cam_34-36: 2 cm closer to the bay, like park_face_dist_cw
+        'park_offset_long_cw':      ('park_offset_long_cw',      -0.023, float),
         'park_offset_lat_cw':       ('park_offset_lat_cw',       0.01, float),
         # --- /localization_state -------------------------------------------
         # With 'recovering'/'lost' at most this fast (curvature stays the same).
