@@ -120,7 +120,7 @@ from numpy.lib.stride_tricks import sliding_window_view
 DEFAULT_RANGES = {
     'red':     {'hue': [(0, 10), (177, 179)], 's_min': 110, 'v_min': 12},
     'green':   {'hue': [(40, 72)],            's_min': 50,  'v_min': 12},
-    'magenta': {'hue': [(140, 176)],          's_min': 90,  'v_min': 15},
+    'magenta': {'hue': [(140, 168)],          's_min': 90,  'v_min': 15},
 }
 
 # BGR colours for debug overlays
@@ -397,7 +397,8 @@ def classify_zone(image_bgr: np.ndarray, phi: np.ndarray, r_inner: np.ndarray,
                   use_frac: float = 1.0, adaptive_factor: float = 0.0,
                   adaptive_deg: float = 20.0,
                   rg_z_min: float = 0.15, rg_s_min: int = 60,
-                  rg_d_min: int = 20, z0=None, rg_d_min_red: int = None):
+                  rg_d_min: int = 20, z0=None, rg_d_min_red: int = None,
+                  red_mag_guard=None):
     """Colour per point by voting over a radial segment.
 
     The segment is NOT of constant width; it is computed per point from two
@@ -539,6 +540,19 @@ def classify_zone(image_bgr: np.ndarray, phi: np.ndarray, r_inner: np.ndarray,
             if name == 'red' and rg_d_min_red is not None and rg_d_min_red >= 0:
                 d_min = rg_d_min_red
             hit &= np.abs(dd) >= d_min
+            # Magenta guard: the rg index alone calls the magenta parking
+            # wall red (G-R is just as negative). cam_49, 13 samples per point
+            # replayed on the recorded frames: bay wall points labelled red
+            # 5126 -> 121, red pylons 3652 -> 3392 still red. The CSI camera
+            # shows red pylons at H 170..179 with B/R 0.44, the wall at
+            # H 160..168 with B/R 0.63 -- so a pixel in the magenta hue band
+            # with a lot of blue is no red vote. cam_47/48/49: green pylon in
+            # front of the bay seen as red at the corner-4 scan stop.
+            if name == 'red' and red_mag_guard is not None:
+                g_lo, g_hi, g_br = red_mag_guard
+                blue = stack[..., 0].astype(np.float32)
+                red_ch = stack[..., 2].astype(np.float32)
+                hit &= ~((hh >= g_lo) & (hh <= g_hi) & (blue >= g_br * red_ch))
         else:
             # magenta (parking zone) stays on the hue path: the hue is
             # unambiguous there and there is no measurement series for a better

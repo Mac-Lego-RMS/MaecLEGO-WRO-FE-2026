@@ -300,6 +300,9 @@ class LidarPixelMapper(Node):
         self.declare_parameter('rg_d_min', 20)
         # Own |G-R| gate for red; -1 = same as rg_d_min. See classify_zone.
         self.declare_parameter('rg_d_min_red', -1)
+        # Magenta guard for red: [hue_lo, hue_hi, B/R min]; a pixel inside
+        # the hue band with B >= ratio*R is no red vote. Empty = off.
+        self.declare_parameter('red_mag_guard', [135.0, 168.0, 0.5])
         # --- neutral point / white balance on the field -------------------- #
         # rg_index assumes that a colourless surface gives z=0. Measured on the
         # setup the WHITE mat gives z=+0.084 -- so red needs a 3.5 times larger
@@ -925,6 +928,7 @@ class LidarPixelMapper(Node):
                 rg_s_min=int(self.get_parameter('rg_s_min').value),
                 rg_d_min=int(self.get_parameter('rg_d_min').value),
                 rg_d_min_red=int(self.get_parameter('rg_d_min_red').value),
+                red_mag_guard=(list(self.get_parameter('red_mag_guard').value) or None),
                 z0=z0)
         else:
             bgr, hsv = colors.sample_colors(
