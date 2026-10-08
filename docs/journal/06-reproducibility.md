@@ -115,7 +115,18 @@ and hand measurements go to [`docs/data/manual/`](../data/manual) — see
 
 **On the field.** Every run is recorded as a rosbag. The scripts in
 [`docs/analysis/`](../analysis) turn the bags into metrics and figures; the
-results over all recorded runs are in [chapter 3](04-software.md).
+results over all 293 recorded runs are in [chapter 3](04-software.md). Per run,
+`make_all.py` writes the key numbers of every tool to a log and `run_extras.py`
+extracts the controller log and the CPU load; `bag_metrics.py`,
+`plot_overview.py`, `plot_across_runs.py` and `plot_parking.py` then combine all
+runs. The combined inputs — [`runs.csv`](../data/runs.csv),
+[`bag_metrics.csv`](../data/bag_metrics.csv),
+[`rosout_dump.txt.gz`](../data/rosout_dump.txt.gz),
+[`cpu_phases.txt`](../data/cpu_phases.txt) and the per-run logs
+([`make_all_logs.tar.gz`](../data/make_all_logs.tar.gz)) — are in the
+repository, so every figure can be rebuilt without the 15 GB of recordings.
+[`run_series.py`](../analysis/run_series.py) lists which recordings count as
+test runs.
 
 On every push to `main`, GitHub Actions checks the README length and
 untranslated text and builds this journal as a PDF.

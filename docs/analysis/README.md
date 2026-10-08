@@ -56,6 +56,13 @@ contains many bags, or a CSV export directory written by `bag_export.py`.
 | `plot_parking.py` | `python3 plot_parking.py [../data/runs.csv] [--range-size 10]` - M17 parking results over the runs |
 | `plot_manual.py` | `python3 plot_manual.py [--example] [--true-frame field] [--side-to-centre-cm W]` - M1 / M3 / M17 ruler from the CSVs in `docs/data/manual/`; `--gyro-integral BAG --t0 T --t1 T` helps filling M3 |
 | `make_all.py` | `python3 make_all.py BAGS...` - everything above |
+| `run_extras.py` | `python3 run_extras.py BAG... --rosout rosout_dump.txt --cpu cpu_phases.txt` - controller log as text and CPU load standing / driving, appended per run |
+| `bag_metrics.py` | `python3 bag_metrics.py make_all_*.log -o ../data/bag_metrics.csv` - key numbers of every run from the make_all logs |
+| `plot_overview.py` | `python3 plot_overview.py ../data/runs.csv ../data/rosout_dump.txt.gz` - outcome of every run, failure Pareto, CPU and battery per run |
+| `plot_across_runs.py` | `python3 plot_across_runs.py ../data/bag_metrics.csv ../data/cpu_phases.txt --runs ../data/runs.csv` - dead time, latency, localisation, tracking and CPU over all runs |
+| `plot_colour_pooled.py` | `python3 plot_colour_pooled.py make_all_*.log [--bags LIST]` - colour classification against range, pooled |
+| `run_series.py` | the test series that count as runs, with their marker and colour |
+| `bag_to_mcap.py` | `python3 bag_to_mcap.py BAG...` - recording to MCAP with message definitions, for Foxglove |
 
 All plot tools take `--out-dir` (default `docs/figures/`) and `--msg-dir`.
 Shared code: `bagio.py` (reading, flattening, topic names), `metrics.py`

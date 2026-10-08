@@ -10,9 +10,9 @@ used for unparking and parking and stops the motor on its own if the Jetson
 falls silent. Both talk over UART (115200 baud) with a binary protocol. The
 clocks are synchronised every 10 s (NTP-style ping-pong, least-squares fit of
 offset and drift, ESP reboots are detected), so that encoder samples from the
-ESP and IMU/LiDAR samples on the Jetson share one time base. Over all
-recorded runs the one-way latency from the ESP to the Jetson was 1.6 ms
-(median of the run medians, p95 8.2 ms) and the round trip 0.66 ms.
+ESP and IMU/LiDAR samples on the Jetson share one time base. Over all 293
+recorded runs the one-way latency from the ESP to the Jetson was 1.1 ms
+(median of the run medians, p95 4.8 ms) and the round trip 0.64 ms.
 
 The split follows one rule: everything that needs the map or the camera runs on
 the Jetson, everything that must react within milliseconds to the motor runs on
@@ -247,14 +247,16 @@ node and a pillar clustering that compared all point pairs. Now the node keeps
 only the newest scan (queue depth 1) and the pillar clustering uses a 4 cm grid.
 Wall matches are still applied with the current pose, not the pose at scan time.
 
-**Result.** In the 42 driving runs with a recorded localisation state, the
-state was `ok` for 100 % of the time in the median (mean 96.3 %). On average
-3.7 walls were matched per scan; the innovation of the wall distance had a
-standard deviation of 2.2 cm, of the wall angle 2.7°. `lost` occurred in 13 runs,
-in 5 of the 6 runs with a logged transition only after parking had started,
-because inside the bay the LiDAR sees only 0–2 walls. The only run that lost the
-localisation during the race was `parken_test_14` (the duplicate scan_processor,
-see [Edge cases](#edge-cases)).
+**Result.** In the 259 driving runs with a recorded localisation state, the
+state was `ok` for 100 % of the time in the median (mean 95.4 %). In the median
+3.0 walls were matched per scan; the innovation of the wall distance had a
+standard deviation of 1.4 cm, of the wall angle 2.0°. The controller logged a
+change to `lost` in 56 runs, and in 51 of them only after parking had started,
+because inside the bay the LiDAR sees only 0–2 walls; the time after parking is
+part of the shares in the figure. During the race the localisation was lost in
+5 of the 259 runs: `parken_test_14` (the duplicate scan_processor, see
+[Edge cases](#edge-cases)), `open_test_9`, `only_parken_44`, `sim_2` and
+`cam_56`.
 
 ![Localisation state and wall matching quality per run.](../figures/localization_across_runs.png)
 
@@ -335,8 +337,9 @@ turns.
 
 ![Seats of the next straight in view before the corner, 120° vs. 240° horizontal field of view (geometry only).](../figures/fov_coverage.svg)
 
-Pooled over 59 bags (1.15 million points on red, 0.96 million on green pillars,
-reference: the robot's own final map), red is classified correctly for 48–63 %
+With the PiCam360, pooled over 59 bags of the `cw_pos1` and `parken_test`
+series (1.15 million points on red, 0.96 million on green pillars, reference:
+the robot's own final map), red is classified correctly for 48–63 %
 of its points up to 1.1 m and almost never as the other colour (at most 5 %).
 Green is recognised less often (18–36 % up to 1 m), and at 1.4 m 25 % of its
 points are read as red, at 1.6 m still 13 %. A wrong colour is more dangerous
@@ -346,7 +349,18 @@ on its own: the reference is the robot's own map, and most points were recorded
 while driving, when only a small share of points gets a colour at all. The
 reliable figure is the wrong-colour rate.
 
-![Colour classification against range, pooled over all bags.](../figures/colour_distance_pooled.png)
+![Colour classification against range with the PiCam360 (USB), pooled over 59 bags.](../figures/colour_distance_pooled.png)
+
+**With the CSI camera** (chapter 2) the wrong-colour rate is the figure that
+improved most. Pooled over the 66 runs of the `cam` series (2.5 million points
+on red, 2.5 million on green pillars), green is read as red in at most 2 % of
+its points up to 2.1 m — against 25 % at 1.4 m and 13 % at 1.6 m with the
+PiCam360. Red is classified correctly for 60–66 % of its points up to 1.1 m
+(PiCam360: 48–63 %). Green stays the weaker colour: it is recognised for 30–40 %
+of its points up to 0.9 m and fades beyond 1.4 m, which the votes of several
+scans and the 1.60 m colour range absorb.
+
+![Colour classification against range with the IMX219-200 (CSI), pooled over 66 runs of the `cam` series.](../figures/colour_distance_csi.png)
 
 ## Lane following
 
@@ -381,17 +395,17 @@ Two additions came from test runs:
 
   The effective dead time is therefore about 235–250 ms, and the 260 ms set in
   the controller lie 10–25 ms above it. The evaluation of all bags gives
-  167 ms (median over 55 runs) for the first stage alone, measured on the
-  recorder's time stamps; with the two other stages that would be about
-  210 ms. Since the steering calibration was updated (22.09.), the measured
-  yaw-rate gain is 1.13 instead of the 0.84 used in the prediction, i.e. the
-  car turns in more than the predictor assumes.
+  162 ms (median over 265 runs, interquartile range 157–168 ms) for the first
+  stage alone, measured on the recorder's time stamps; with the two other
+  stages that would be about 205 ms. Since the steering calibration was updated
+  (22.09.), the measured yaw-rate gain is 1.05–1.13 instead of the 0.84 used in
+  the prediction, i.e. the car turns in more than the predictor assumes.
 - **Smoothed steering pose.** Wall corrections move the pose by 1–1.5 cm several
   times per second, which gave 2–3° steering jumps on calm straights. For the
   steering law they are blended in over 0.30 s; larger jumps are taken over at
   once.
 
-![Delay from the command to the gyro reaction per run, from all bags (median 167 ms). The 260 ms of the controller also cover the delays of the EKF and the control loop.](../figures/dead_time_across_runs.png)
+![Delay from the command to the gyro reaction per run, from all bags (median 162 ms). The 260 ms of the controller also cover the delays of the EKF and the control loop.](../figures/dead_time_across_runs.png)
 
 **Corners** are tangential circular arcs between the entry and exit lane lines
 and are driven in the state `TURN` with their own law: the feed-forward
@@ -457,10 +471,12 @@ precisely.
 
 **Tracking accuracy.** For every run the error is summarised as its RMS over the
 run (square root of the mean squared error), which weights large deviations more
-than a plain mean. The lateral error to the planned arc was 3.9 cm RMS in the
-median of the runs (4.3 cm in the `cw_pos1` series); the four runs above 18 cm
-all ended early (stuck turn, emergency stop). On the straights the heading error
-was 5.8° RMS (12.8° in `cw_pos1`), including the lane changes around pillars.
+than a plain mean. Over 265 runs the lateral error to the planned arc was
+4.2 cm RMS in the median (3.9 cm in the `cam` series, 4.3 cm in `cw_pos1`); the
+two runs above 18 cm both ended early (stuck turn, emergency stop). On the
+straights the heading error was 7.7° RMS in the median, including the lane
+changes around pillars: 4.0° in the open challenge (`open_test`), without
+pillars, and 8.5° in the `cam` series with them.
 The lateral error on the straights was not recorded, because its debug topic
 was switched off.
 
@@ -586,14 +602,19 @@ of moves (steering, distance) into poses.
 
 | Runs | Within 2 cm | Median axle difference | Median heading error | Median lateral deviation |
 |---|---|---|---|---|
-| 2–19 | 6 / 8 | 1.5 cm | 8.0° | 1.3 cm |
-| 22–33 | 2 / 7 | 3.2 cm | 17.5° | 2.9 cm |
-| 35–46 (heading correction at the start pose, closed-loop reverse) | 5 / 5 | 0.3 cm | 1.7° | 0.6 cm |
+| `parken_test` 2–19 | 6 / 8 | 1.5 cm | 8.0° | 1.3 cm |
+| `parken_test` 22–33 | 2 / 7 | 3.2 cm | 17.5° | 2.9 cm |
+| `parken_test` 35–46 (heading correction at the start pose, closed-loop reverse) | 5 / 5 | 0.3 cm | 1.7° | 0.6 cm |
+| `only_parken` (one lap, then park; 04.–06.10.) | 95 / 96 | 0.8 cm | 4.1° | 2.9 cm |
+| `sim` (three laps and park, virtual pillars; 07.10.) | 17 / 17 | 0.3 cm | 1.6° | 4.8 cm |
+| `cam` (three laps and park, CSI camera; 07.–08.10.) | 62 / 63 | 0.5 cm | 2.7° | 3.4 cm |
 
 The 2 cm rule (axle difference $= 0.105\,\text{m}\cdot|\sin\psi|$) depends only
-on the heading and is met for $|\psi| \le 11°$; the lateral deviation stayed
-within ±5 cm in all 20 runs. The heading correction at the start pose appears in
-the logs from run 35, the closed-loop reverse from run 38. Values are the
+on the heading and is met for $|\psi| \le 11°$. The heading correction at the
+start pose appears in the logs from run 35, the closed-loop reverse from run 38;
+since then 179 of 181 parked runs met the rule. The lateral deviation, which the
+rule does not judge, grew in the later series: within ±5 cm in all 20
+`parken_test` runs, but up to 9.5 cm in `only_parken` and `cam`. Values are the
 robot's own estimate (EKF), not measured with a ruler.
 
 ![Final pose after parking and axle difference per run.](../figures/parking_final_pose.png)
@@ -621,8 +642,8 @@ robot's own estimate (EKF), not measured with a ruler.
 
 ## Testing and tuning
 
-Every test run is recorded as a bag (`parken_test_1` … `_49`, before that
-`cw_pos1_N`) with all topics except the camera image. Runs are evaluated offline:
+Every test run is recorded as a bag with all topics except the camera image;
+the series are listed under [Results over all test runs](#results-over-all-test-runs). Runs are evaluated offline:
 log, path against pillars, LiDAR distances, camera colour per pillar over time,
 stopping distance, CPU per core and process. New rules are replayed against old
 runs before they go on the robot. Two examples: the see-through votes were
@@ -648,33 +669,46 @@ specific test runs 14 times. The evaluation scripts are in `docs/analysis`.
 
 ### Results over all test runs
 
-The outcome of every run is taken from its log (`summarize_runs.py`). 71 bags
-from 11.–29.09. were evaluated: `cw_pos1_1…22` (race only, three laps) and
-`parken_test_1…49` (race and parking).
+The outcome of every run is taken from its log (`summarize_runs.py`,
+`plot_overview.py`). 293 bags from 11.09. to 08.10. were evaluated, in eight
+series:
 
-| Series | Result |
-|---|---|
-| `cw_pos1` (race only) | 17 of 22 runs finished three laps (77 %) |
-| `parken_test` (race and parking) | 20 of 45 runs parked (44 %), 13 of them within 2 cm (29 %) |
-| `parken_test_35…46` | 5 of 5 parked runs within 2 cm |
+| Series | Task | Result |
+|---|---|---|
+| `cw_pos1` (11.–14.09.) | obstacle challenge, three laps, no parking | 17 of 22 runs finished three laps (77 %) |
+| `parken_test` (21.–29.09.) | laps and parking | 20 of 45 runs parked (44 %), 13 of them within 2 cm (29 %) |
+| `parken_test_35…46` | the same, after the start-pose correction | 5 of 5 parked runs within 2 cm |
+| `open_test` (03.10.) | open challenge, three laps | 11 of 14 started runs finished (79 %) |
+| `only_parken` (04.–06.10.) | unpark, one lap, park | 95 of 114 runs parked within 2 cm (83 %) |
+| `sim` (07.10.) | three laps and parking, virtual pillars | 17 of 18 runs parked within 2 cm (94 %) |
+| `cam` (07.–08.10.) | full obstacle challenge with the CSI camera | 62 of 66 runs parked within 2 cm (94 %) |
+| `obstacle_test`, `video_bag` | single test and video runs | none of 5 completed |
 
 ![Outcome of every run and success rate over the iterations.](../figures/runs_outcomes.png)
 
-The most frequent cause of failure is not the parking geometry but the ESP
-position moves: in 10 runs (27 % of all failures) a move did not reach its
-target before the 4 s timeout. In the last block (runs 34–49) parking was precise
-whenever the robot got there, but only 5 of 16 runs got that far. Eight runs end
-in the log while driving without an emergency stop; in `parken_test_20` and `_36`
-the turn was stuck at about 70° heading error. Four runs ended with an emergency
-stop at a corner, e.g. `parken_test_42`: a red pillar stood in the arc of corner
-3, no radius kept 8 cm clearance, the obstacle path led far outwards and the
-turn-in point was missed by 1.46 m sideways.
+The success rate rose from about 30 % in the `parken_test` series to above 90 %
+in the last two days. The full obstacle challenge — unparking, three laps
+around real pillars seen by the camera, parking — succeeded in 62 of 66 runs of
+the `cam` series.
 
-![Why runs did not reach the goal (37 of 71 runs).](../figures/runs_failure_pareto.png)
+Over all series the most frequent cause of failure is still the ESP position
+moves: in 19 runs (28 % of the 69 failures) a move did not reach its target
+before the 4 s timeout, 10 of them in `parken_test`. In the last block of that
+series (runs 34–49) parking was precise whenever the robot got there, but only
+5 of 16 runs got that far. 16 runs end in the log while driving without an
+emergency stop; in `parken_test_20` and `_36` the turn was stuck at about 70°
+heading error. 13 runs ended with an emergency stop, e.g. `parken_test_42`: a
+red pillar stood in the arc of corner 3, no radius kept 8 cm clearance, the
+obstacle path led far outwards and the turn-in point was missed by 1.46 m
+sideways.
+
+![Why runs did not reach the goal (69 of 293 runs).](../figures/runs_failure_pareto.png)
 
 ![Run parken_test_42: emergency stop after corner 3.](../figures/trajectory_parken_test_42.png)
 
-Almost all of these runs were driven with a cruise speed of 0.35 m/s; the
-faster speed profile (0.75 m/s on straights) was only set afterwards (commit
-3f3a22d).
+The runs up to 29.09. were driven with a cruise speed of 0.35 m/s. From October
+the faster speed profile (0.75 m/s on straights, commit 3f3a22d) is used: the
+mean speed while moving was 0.81 m/s in the open challenge and 0.38 m/s in the
+`cam` series, where the obstacle paths and the parking manoeuvres are driven
+slower.
 

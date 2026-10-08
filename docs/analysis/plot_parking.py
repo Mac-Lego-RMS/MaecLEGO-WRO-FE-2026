@@ -9,10 +9,9 @@ Aussenbande (erwartet E), Kurs H grad zur Bande = A cm Achsdifferenz"):
   park_heading_deg    = H      (heading relative to the wall)
   park_axle_diff_cm   = A = |0.105 m x sin(H)|; WRO rule: at most 2 cm, i.e.
                         |H| <= asin(0.02 / 0.105) = 11.0 deg
-Runs are grouped by their number (trailing digits of the bag name) into
-ranges of --range-size and coloured light -> dark, so later iterations are
-darker. Bag-name families (text before the number, e.g. parken_test vs
-cw_pos1) get different marker shapes.
+Every test series (run_series.py) has its own marker and colour, and runs
+are drawn in recording order. Printed: success rate per series, and for
+parken_test per range of --range-size runs.
 
 Figure parking: (a) heading error vs lateral deviation, (b) axle difference
 per run with the 2 cm line. Printed: success rate per run range.
@@ -27,6 +26,7 @@ import numpy as np
 import pandas as pd
 
 import bagio
+import run_series
 import style
 from robot_constants import PARK_AXLE_RULE_CM, PARK_WHEELBASE
 
@@ -49,21 +49,21 @@ def run(argv=None):
     if not len(pk):
         print('nothing to plot')
         return {}
-    pk['family'] = pk['bag'].map(family)
-    rs = a.range_size
-    pk['range_lo'] = (np.floor((pk['run_no'].fillna(0) - 1) / rs) * rs + 1).astype(int)
-    ranges = sorted(pk['range_lo'].unique())
-    cols = dict(zip(ranges, style.seq_colors(len(ranges))))
-    fams = sorted(pk['family'].unique())
-    marks = {f: MARKERS[i % len(MARKERS)] for i, f in enumerate(fams)}
+    pk = pk[pk['bag'].map(run_series.is_run)].copy()
+    pk['family'] = pk['bag'].map(run_series.family)
+    pk['start'] = pd.to_datetime(pk['start_utc'], utc=True, format='ISO8601')
+    pk = run_series.order(pk, 'start')
+    fams = [f for f in run_series.SERIES if f in set(pk['family'])]
     h_rule = math.degrees(math.asin(PARK_AXLE_RULE_CM / 100 / PARK_WHEELBASE))
 
     fig, (a1, a2) = style.figure(1, 2, width=8.0, height=3.6)
-    for (lo, fam), g in pk.groupby(['range_lo', 'family']):
-        kw = dict(color=cols[lo], marker=marks[fam], s=46, edgecolors=style.SURFACE, linewidths=1.2,
-                  zorder=3)
+    for fam in fams:
+        g = pk[pk['family'] == fam]
+        mk, col = run_series.marker(fam)
+        kw = dict(color=col, marker=mk, s=30, edgecolors=style.SURFACE, linewidths=0.8, zorder=3,
+                  label=run_series.label(fam))
         a1.scatter(g['park_lateral_dev_cm'], g['park_heading_deg'], **kw)
-        a2.scatter(g['run_no'], g['park_axle_diff_cm'], **kw)
+        a2.scatter(g['seq'], g['park_axle_diff_cm'], **kw)
     ylim = max(h_rule * 1.4, float(pk['park_heading_deg'].abs().max()) * 1.15)
     a1.set_ylim(-ylim, ylim)
     a1.axhspan(-h_rule, h_rule, color=style.GRID, alpha=0.5, lw=0, zorder=0)
@@ -75,36 +75,35 @@ def run(argv=None):
     a1.set_ylabel('heading error to the wall [deg]')
     a1.set_title('Final pose after parking')
     a2.axhline(PARK_AXLE_RULE_CM, color=style.INK_2, lw=0.9)
-    a2.text(a2.get_xlim()[0], PARK_AXLE_RULE_CM, ' rule: 2 cm', fontsize=7, color=style.INK_2, va='bottom')
     a2.set_ylim(0, max(PARK_AXLE_RULE_CM * 1.6, float(pk['park_axle_diff_cm'].max()) * 1.15))
-    from matplotlib.ticker import MaxNLocator
-    a2.xaxis.set_major_locator(MaxNLocator(integer=True))
-    a2.set_xlabel('run number')
+    run_series.day_lines(a2, pk, 'start', a2.get_ylim()[1] * 0.97, min_runs=20)
+    a2.text(a2.get_xlim()[0], PARK_AXLE_RULE_CM, ' rule: 2 cm', fontsize=7, color=style.INK_2, va='bottom')
+    a2.set_xticks([])
+    a2.set_xlabel(f'{len(pk)} parked runs in recording order')
     a2.set_ylabel('axle difference [cm]')
     a2.set_title('Axle difference per run')
-    # legend: run ranges (colour) and families (marker)
-    from matplotlib.lines import Line2D
-    handles = [Line2D([], [], ls='', marker='o', color=cols[lo], ms=7, label=f'runs {lo}-{lo + rs - 1}')
-               for lo in ranges]
-    if len(fams) > 1:
-        handles += [Line2D([], [], ls='', marker=marks[f], color=style.MUTED, ms=7, label=f) for f in fams]
-    a1.legend(handles=handles, loc='upper left', bbox_to_anchor=(0.0, -0.2), ncol=min(6, len(handles)),
-              borderaxespad=0.0)
+    a1.legend(loc='lower left', fontsize=6.5, borderaxespad=0.3)
     style.save(fig, a.out_dir, 'parking',
                style.source_caption(pk['bag'].tolist(), f'plot_parking.py ({Path(a.runs_csv).name})'))
 
     res = {}
     print(f'  WRO rule: axle difference <= {PARK_AXLE_RULE_CM} cm (|heading| <= {h_rule:.1f} deg)')
-    for lo in ranges:
-        g = pk[pk['range_lo'] == lo]
+    groups = [(f, pk[pk['family'] == f]) for f in fams]
+    rs = a.range_size
+    pt = pk[pk['family'] == 'parken_test']
+    for lo in sorted(set((np.floor((pt['run_no'] - 1) / rs) * rs + 1).astype(int))):
+        groups.append((f'parken_test {lo}-{lo + rs - 1}', pt[(pt['run_no'] >= lo) & (pt['run_no'] < lo + rs)]))
+    for key, g in groups:
         ok = int(g['park_within_2cm'].fillna(False).astype(bool).sum())
-        res[lo] = {'n': len(g), 'within': ok,
-                   'median_axle_cm': float(g['park_axle_diff_cm'].median()),
-                   'median_abs_heading_deg': float(g['park_heading_deg'].abs().median()),
-                   'median_abs_lateral_cm': float(g['park_lateral_dev_cm'].abs().median())}
-        print(f'  runs {lo}-{lo + rs - 1}: {ok}/{len(g)} within 2 cm, median axle diff '
-              f'{res[lo]["median_axle_cm"]:.2f} cm, median |heading| {res[lo]["median_abs_heading_deg"]:.1f} deg, '
-              f'median |lateral| {res[lo]["median_abs_lateral_cm"]:.1f} cm')
+        stats = {'n': len(g), 'within': ok,
+                    'median_axle_cm': float(g['park_axle_diff_cm'].median()),
+                    'median_abs_heading_deg': float(g['park_heading_deg'].abs().median()),
+                    'median_abs_lateral_cm': float(g['park_lateral_dev_cm'].abs().median())}
+        if key in run_series.SERIES:              # the parken_test ranges are printed only
+            res[key] = stats
+        print(f'  {key}: {ok}/{len(g)} within 2 cm, median axle diff '
+              f'{stats["median_axle_cm"]:.2f} cm, median |heading| {stats["median_abs_heading_deg"]:.1f} deg, '
+              f'median |lateral| {stats["median_abs_lateral_cm"]:.1f} cm')
     return res
 
 
