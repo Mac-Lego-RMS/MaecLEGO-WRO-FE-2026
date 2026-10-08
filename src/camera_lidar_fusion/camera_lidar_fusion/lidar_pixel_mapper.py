@@ -303,6 +303,8 @@ class LidarPixelMapper(Node):
         # Magenta guard for red: [hue_lo, hue_hi, B/R min]; a pixel inside
         # the hue band with B >= ratio*R is no red vote. Empty = off.
         self.declare_parameter('red_mag_guard', [135.0, 168.0, 0.5])
+        # Minimum brightness V of a red vote (0 = off). See classify_zone.
+        self.declare_parameter('rg_v_min_red', 60)
         # --- neutral point / white balance on the field -------------------- #
         # rg_index assumes that a colourless surface gives z=0. Measured on the
         # setup the WHITE mat gives z=+0.084 -- so red needs a 3.5 times larger
@@ -770,7 +772,7 @@ class LidarPixelMapper(Node):
             return self.calib.cam_z
         return self.calib.cam_z - rho * math.tan(depression)
 
-    def _zone_radii(self, rho, h_bottom, h_top):
+    def _zone_radii(self, rho, h_bottom, h_top, phi=None):
         """Two heights above the lidar plane -> image radii per point.
 
         The whole point: the thickness of the zone follows from the geometry
@@ -787,7 +789,7 @@ class LidarPixelMapper(Node):
         # node), the measurement applies. It also captures the model error at the
         # image edge that the computation below cannot know about.
         if self.calib.zone_calibrated:
-            return self.calib.zone_radii(rho)
+            return self.calib.zone_radii(rho, phi)
         dz_top = h_top - self.calib.cam_z
         dz_bottom = h_bottom - self.calib.cam_z
         r_inner = self.calib.focal_px * np.arctan2(rho, dz_top)
@@ -907,7 +909,7 @@ class LidarPixelMapper(Node):
                 r_inner = np.full(rho_img.shape, fix_in)
                 r_outer = np.full(rho_img.shape, fix_out)
             else:
-                r_inner, r_outer = self._zone_radii(rho_img, zone_low, zone_high)
+                r_inner, r_outer = self._zone_radii(rho_img, zone_low, zone_high, phi)
             r_min = float(self.get_parameter('sample_r_min_px').value)
             if r_min > 0.0:
                 r_inner = np.maximum(r_inner, r_min)
@@ -929,6 +931,7 @@ class LidarPixelMapper(Node):
                 rg_d_min=int(self.get_parameter('rg_d_min').value),
                 rg_d_min_red=int(self.get_parameter('rg_d_min_red').value),
                 red_mag_guard=(list(self.get_parameter('red_mag_guard').value) or None),
+                rg_v_min_red=int(self.get_parameter('rg_v_min_red').value),
                 z0=z0)
         else:
             bgr, hsv = colors.sample_colors(
@@ -1041,7 +1044,9 @@ class LidarPixelMapper(Node):
         z_hi = self.get_parameter('sample_zone_high_m').value
         zone_on = z_hi > z_lo or self.calib.zone_calibrated
         if zone_on:
-            r_inner, r_outer = self._zone_radii(rho, z_lo, z_hi)
+            r_inner, r_outer = self._zone_radii(
+                rho, z_lo, z_hi, np.arctan2(np.asarray(v) - self.calib.cy,
+                                            np.asarray(u) - self.calib.cx))
         else:
             r_inner = r_outer = None
         az_pt = np.arctan2(np.asarray(v) - self.calib.cy,

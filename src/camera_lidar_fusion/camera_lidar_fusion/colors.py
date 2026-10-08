@@ -398,7 +398,7 @@ def classify_zone(image_bgr: np.ndarray, phi: np.ndarray, r_inner: np.ndarray,
                   adaptive_deg: float = 20.0,
                   rg_z_min: float = 0.15, rg_s_min: int = 60,
                   rg_d_min: int = 20, z0=None, rg_d_min_red: int = None,
-                  red_mag_guard=None):
+                  red_mag_guard=None, rg_v_min_red: int = 0):
     """Colour per point by voting over a radial segment.
 
     The segment is NOT of constant width; it is computed per point from two
@@ -548,6 +548,11 @@ def classify_zone(image_bgr: np.ndarray, phi: np.ndarray, r_inner: np.ndarray,
             # H 160..168 with B/R 0.63 -- so a pixel in the magenta hue band
             # with a lot of blue is no red vote. cam_47/48/49: green pylon in
             # front of the bay seen as red at the corner-4 scan stop.
+            # Dark red-brown background (furniture, floor beyond the field)
+            # sampled next to a pylon read red: V 40..52. Red pylon pixels sit
+            # at V >= 72 (1st percentile, cam_49), median 150.
+            if name == 'red' and rg_v_min_red > 0:
+                hit &= vv >= rg_v_min_red
             if name == 'red' and red_mag_guard is not None:
                 g_lo, g_hi, g_br = red_mag_guard
                 blue = stack[..., 0].astype(np.float32)

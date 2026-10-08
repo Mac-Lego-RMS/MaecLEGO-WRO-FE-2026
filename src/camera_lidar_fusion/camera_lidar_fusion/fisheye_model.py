@@ -81,6 +81,16 @@ class FisheyeCalib:
     zone_k_in: float = 0.0
     zone_r0_out: float = 0.0
     zone_k_out: float = 0.0
+    # Direction-dependent shift of both zone limits in px:
+    #     dr(phi) = zone_dr0 + zone_dr_cos*cos(phi) + zone_dr_sin*sin(phi)
+    # (phi = image azimuth). The lens sits on double-sided tape, slightly off
+    # centre / tilted: on 08.10.2026 (cam_49, 45 pylon sightings) the coloured
+    # part of the pylons lay 15..24 px further out than the zone on the left
+    # and ~5 px further in at the front -- a green pylon at 60 deg left was
+    # sampled in the red background above it. 0/0/0 = off.
+    zone_dr0: float = 0.0
+    zone_dr_cos: float = 0.0
+    zone_dr_sin: float = 0.0
 
     # --- metadata ---
     image_width: int = 1280
@@ -103,11 +113,15 @@ class FisheyeCalib:
     def zone_calibrated(self) -> bool:
         return self.zone_k_out != 0.0 or self.zone_r0_out != 0.0
 
-    def zone_radii(self, rho) -> tuple:
-        """Distance -> (r_inner, r_outer) of the sampling zone in px."""
+    def zone_radii(self, rho, phi=None) -> tuple:
+        """Distance (and image azimuth) -> (r_inner, r_outer) of the sampling zone in px."""
         rho = np.maximum(np.asarray(rho, dtype=float), 1e-3)
-        return (self.zone_r0_in + self.zone_k_in / rho,
-                self.zone_r0_out + self.zone_k_out / rho)
+        dr = 0.0
+        if phi is not None and (self.zone_dr0 or self.zone_dr_cos or self.zone_dr_sin):
+            phi = np.asarray(phi, dtype=float)
+            dr = self.zone_dr0 + self.zone_dr_cos * np.cos(phi) + self.zone_dr_sin * np.sin(phi)
+        return (self.zone_r0_in + self.zone_k_in / rho + dr,
+                self.zone_r0_out + self.zone_k_out / rho + dr)
 
     def rotation_matrix(self) -> np.ndarray:
         """R with P_cam = R @ (P_robot - t)."""
