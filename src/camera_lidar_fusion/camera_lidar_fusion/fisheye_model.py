@@ -83,8 +83,8 @@ class FisheyeCalib:
     zone_k_out: float = 0.0
     # Direction-dependent shift of both zone limits in px:
     #     dr(phi) = zone_dr0 + zone_dr_cos*cos(phi) + zone_dr_sin*sin(phi)
-    # (phi = image azimuth). The lens sits on double-sided tape, slightly off
-    # centre / tilted: on 08.10.2026 (cam_49, 45 pylon sightings) the coloured
+    # (phi = image azimuth). The lens sits slightly off centre / tilted in
+    # its (fixed) mount: on 08.10.2026 (cam_49, 45 pylon sightings) the coloured
     # part of the pylons lay 15..24 px further out than the zone on the left
     # and ~5 px further in at the front -- a green pylon at 60 deg left was
     # sampled in the red background above it. 0/0/0 = off.
