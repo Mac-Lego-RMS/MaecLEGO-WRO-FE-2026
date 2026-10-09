@@ -43,11 +43,11 @@ engineering in mechanical engineering and Finn mathematics.
 
 ![Team MäcLEGO.](../../t-photos/team_photo.jpeg)
 
-| Member | Responsibility |
-|---|---|
+| Member  | Responsibility |
+|---------|---|
+| Finn    | software: estimation, perception, planning and control |
 | Clemens | mechanical design: chassis, steering, drive train, tyres, body |
-| Jannik | electronics and main PCB, parts of the software |
-| Finn | software: estimation, perception, planning and control |
+| Jannik  | electronics and main PCB, parts of the software |
 
 We split the work this way because it matches what each of us is most
 interested in.
