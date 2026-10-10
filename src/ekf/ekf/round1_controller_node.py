@@ -901,7 +901,7 @@ class Round1Controller(Node):
         # further forward than when unparking and hits during the only
         # forward move (in the run: 3.3 of 4.5 cm, then wall). Only for
         # parking, the tuned unpark sequences stay untouched.
-        'park_fwd_corr_cm':         ('park_fwd_corr_cm',         -1.5, float),
+        'park_fwd_corr_cm':         ('park_fwd_corr_cm',         -2.5, float),   # comp_11-13: forward arc 1 cm too long (front wall)
         'park_rev_corr_cm':         ('park_rev_corr_cm',         0.0, float),
         # End-position guard: before the LAST reverse move the LiDAR measures
         # the front magenta wall straight ahead, the drive model predicts the
@@ -3265,7 +3265,7 @@ class Round1Controller(Node):
                     self.unpark_steps_run[self.unpark_index] = (steer, cm)
                     if self._park_end_guard(self.unpark_index, steer, cm, theta):
                         return                       # straight move inserted: steer anew
-                    if self._park_front_safety(self.unpark_index, steer, cm):
+                    if self._park_front_safety(self.unpark_index, steer, cm, theta):
                         return                       # safety move inserted: steer anew
                 deg = cm_to_deg(cm)
                 self.unpark_move_done = None
@@ -4895,13 +4895,18 @@ class Round1Controller(Node):
                 shift, k + 1))
         return True
 
-    def _park_front_safety(self, k, steer, cm):
+    def _park_front_safety(self, k, steer, cm, theta):
         """Forward move in the bay: would the nose reach the front magenta
         wall? Then insert a straight reverse move by the deficit first."""
         if self.park_front_margin <= 0.0 or cm < 0.5 or k in getattr(self, 'park_inserted', set()):
             return False
         done = getattr(self, 'park_front_done', set())
         if k in done:
+            return False
+        # Only nearly straight in the bay: angled (comp_17: -28 deg before the
+        # forward arc) the nearest point ahead is not where the nose will hit,
+        # the safety move then backed it into the rear wall from a good pose.
+        if self.park_origin is not None and abs(math.degrees(wrap(theta - self.park_origin[2]))) > 15.0:
             return False
         now = self.now_s()
         near = [v for (t, v) in getattr(self, 'front_near', []) if now - t < 0.6]
