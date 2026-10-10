@@ -756,7 +756,7 @@ class Round1Controller(Node):
         # wall, and it parked 8 cm too deep (5.7 cm from the outer wall,
         # against it). Both back to 0. only_parken_3: looked good, but very
         # close to the wall in the first two moves -> start 1.5 cm further back.
-        'park_offset_long_ccw':     ('park_offset_long_ccw',     -0.030, float),   # cam_51: 1-2 cm too far ahead
+        'park_offset_long_ccw':     ('park_offset_long_ccw',     0.000, float),   # comp_10 (24 cm bay): start 3 cm further ahead, was too close to the bay
         'park_offset_lat_ccw':      ('park_offset_lat_ccw',      -0.04, float),
         # Only used when the front magenta wall is NOT seen (otherwise the
         # face sets the start along). With a seen face the start came out
@@ -4960,6 +4960,10 @@ class Round1Controller(Node):
             return False
         if self.state != 'TURN':
             return False
+        if not self.scan_lookahead_smart:
+            # mandatory halt on every straight: leave the corner slowly, or it
+            # coasts past the halt point (comp_10 corner 3: 43 cm at 0.7 m/s)
+            return True
         w = self._exit_wall_idx(self.corner_idx)
         mine = [o for o in (self.obstacles or []) if o['wall'] == w]
         if not mine or any(o['color'] not in (OBST_RED, OBST_GREEN) for o in mine):
