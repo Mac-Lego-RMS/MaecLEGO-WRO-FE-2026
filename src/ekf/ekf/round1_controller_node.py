@@ -556,7 +556,7 @@ class Round1Controller(Node):
         # Without compensation it was 10-13.6 cm (sim_11-14). -> only ~2.3 cm
         # of the 4.8 compensated: aim for ~9.5 cm, move 4 only ~1 cm longer.
         'park_depth_extra_ccw':     ('park_depth_extra_ccw',     -0.025, float),
-        'park_start_clearance_ccw': ('park_start_clearance_ccw', 0.00, float),   # comp_22: not deep enough -- start 2 cm closer to the outer wall (start pose lies past the bay)
+        'park_start_clearance_ccw': ('park_start_clearance_ccw', -0.015, float),  # comp_22: 0.02 -> 0, comp_23: another 1.5 cm closer to the outer wall (start pose lies past the bay)
         # Deceleration for braking to v_finish before the last corner. With
         # finish_decel 0.8 it braked only ~0.5 m before the turn-in point and
         # the ESP undershot to 0.16 m/s right at it -- it felt like braking in
@@ -770,7 +770,7 @@ class Round1Controller(Node):
         # against it). Both back to 0. only_parken_3: looked good, but very
         # close to the wall in the first two moves -> start 1.5 cm further back.
         'park_offset_long_ccw':     ('park_offset_long_ccw',     0.020, float),   # comp_20: rear wall touched (LiDAR: 3.5 cm front gap after the forward move) -> +1 cm
-        'park_offset_lat_ccw':      ('park_offset_lat_ccw',      -0.04, float),
+        'park_offset_lat_ccw':      ('park_offset_lat_ccw',      -0.047, float),
         # Only used when the front magenta wall is NOT seen (otherwise the
         # face sets the start along). With a seen face the start came out
         # +1.5..+2.6 cm ahead of the map start with -0.025 (cam_3-10); in
