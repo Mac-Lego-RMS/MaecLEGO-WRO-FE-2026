@@ -556,7 +556,7 @@ class Round1Controller(Node):
         # Without compensation it was 10-13.6 cm (sim_11-14). -> only ~2.3 cm
         # of the 4.8 compensated: aim for ~9.5 cm, move 4 only ~1 cm longer.
         'park_depth_extra_ccw':     ('park_depth_extra_ccw',     -0.025, float),
-        'park_start_clearance_ccw': ('park_start_clearance_ccw', 0.02, float),
+        'park_start_clearance_ccw': ('park_start_clearance_ccw', 0.00, float),   # comp_22: not deep enough -- start 2 cm closer to the outer wall (start pose lies past the bay)
         # Deceleration for braking to v_finish before the last corner. With
         # finish_decel 0.8 it braked only ~0.5 m before the turn-in point and
         # the ESP undershot to 0.16 m/s right at it -- it felt like braking in
