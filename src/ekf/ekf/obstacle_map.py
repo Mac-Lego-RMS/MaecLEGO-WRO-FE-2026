@@ -54,6 +54,10 @@ FAR = 'far'                # vote key for "seen, but too far to trust colour"
 COLOR_NEAR_DIST = 0.90     # colour votes from closer count fully ...
 MID_WEIGHT = 1.0 / 3.0     # ... from here to COLOR_MAX_DIST only this much
 MID = '_mid'               # suffix of the vote key for those ('red_mid', 'green_mid')
+MID_ONLY_MIN = 3           # comp_10: red #11 in the entry row of the straight opposite
+                           # the start straight got 3 red_mid votes and no other
+                           # colour vote -- unknown at weight 1/3, passed as green.
+                           # Unanimous mid-range votes from this many scans count.
 # Why (07.10.2026, cam_23/24/26, live detections on known pylons): red pylons
 # read red at every range (96-100 %), green ones only up to 0.9 m (98 %) --
 # from 0.9 to 1.6 m 20-30 % of them came out RED. Green pylons are first seen
@@ -131,8 +135,13 @@ class ObstacleMap:
                 continue
             red = keys.get('red', 0) + MID_WEIGHT * keys.get('red' + MID, 0)
             green = keys.get('green', 0) + MID_WEIGHT * keys.get('green' + MID, 0)
+            rm, gm = keys.get('red' + MID, 0), keys.get('green' + MID, 0)
             if max(red, green) >= MIN_COLOR_VOTES and red != green:
                 color = 'red' if red > green else 'green'
+            elif rm >= MID_ONLY_MIN and red == MID_WEIGHT * rm and green == 0:
+                color = 'red'      # only mid-range votes, but unanimous (see MID_ONLY_MIN)
+            elif gm >= MID_ONLY_MIN and green == MID_WEIGHT * gm and red == 0:
+                color = 'green'
             else:
                 color = 'unknown'
             si, k, sp, col, row = self.seats[sid]
