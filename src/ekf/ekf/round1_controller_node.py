@@ -534,7 +534,7 @@ class Round1Controller(Node):
         # it still drives at park_wall_clearance (park_pass_q), the reverse
         # of ~30 cm then moves it onto the closer line. CW: the line at
         # 0.305 left the car 1.2 cm out of the bay (only_parken_59).
-        'park_start_clearance_cw':  ('park_start_clearance_cw',  0.02, float),
+        'park_start_clearance_cw':  ('park_start_clearance_cw',  -0.015, float),   # comp_25: like CCW, line may go below 0.275
         # Start the park moves this much further out than the parking line;
         # the sideways compensation lengthens the arcs so the car ends at the
         # same depth. cam_3: start 1 cm further forward and 0.6 cm closer to
@@ -778,7 +778,7 @@ class Round1Controller(Node):
         # map start with -0.025 applied -> ~2.2 cm too far back. -> -0.003.
         # cam_34-36: 2 cm closer to the bay, like park_face_dist_cw
         'park_offset_long_cw':      ('park_offset_long_cw',      0.027, float),   # +1.5 cm with park_face_dist_cw (comp_14);   # see park_face_dist_cw: +4 cm (comp_2/3)
-        'park_offset_lat_cw':       ('park_offset_lat_cw',       0.01, float),
+        'park_offset_lat_cw':       ('park_offset_lat_cw',       -0.02, float),   # comp_25: parked 14.3 cm from the outer wall, ~3 cm further out than CCW
         # --- /localization_state -------------------------------------------
         # With 'recovering'/'lost' at most this fast (curvature stays the same).
         'v_loc_uncertain':          ('v_loc_uncertain',          0.20, float),
