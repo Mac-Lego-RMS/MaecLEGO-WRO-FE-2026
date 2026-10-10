@@ -39,6 +39,12 @@ CLUSTER_RADIUS = 0.04          # region growing: neighbour distance (m)
 MIN_OBSTACLE_POINTS = 5        # fewer points -> stray misclassification
 MAX_OBSTACLE_EXTENT = 0.09     # a pillar spans <= this; longer = noise on a wall
 SECTOR_MARGIN = np.radians(3.0)  # widen each masked sector by this on each side
+# A red and a green cluster closer than this are ONE pillar seen half in each
+# colour (comp_19/20: red #19 from the bay as red n48 + green n31, 4 cm apart,
+# every frame -> red/green votes in lockstep, tie -> taken as green -> passed
+# on the wrong side). Real pillars stand >= 0.2 m apart. The colour with more
+# points wins.
+MIXED_MERGE_DIST = 0.08
 
 
 def _cloud_arrays(msg):
@@ -148,7 +154,7 @@ def detect_obstacles(msg, min_points=MIN_OBSTACLE_POINTS,
     mask_sectors.
     """
     bx, by, rgb, ok = _cloud_arrays(msg)
-    obstacles = []
+    found = []                                  # (colour, points)
 
     for color_rgb, name in ((RED, 'red'), (GREEN, 'green')):
         sel = ok & (rgb == _pack(color_rgb))
@@ -164,17 +170,36 @@ def detect_obstacles(msg, min_points=MIN_OBSTACLE_POINTS,
             extent = float(max(np.ptp(arr[:, 0]), np.ptp(arr[:, 1])))
             if extent > max_extent:
                 continue
+            found.append([name, arr])
 
-            cx, cy = arr[:, 0].mean(), arr[:, 1].mean()
-            d = np.hypot(cx, cy)
-            if d < 1e-6:
-                continue
-            # front face -> centre: push away from the sensor by half a width
-            cx += PILLAR_HALF_WIDTH * cx / d
-            cy += PILLAR_HALF_WIDTH * cy / d
-            obstacles.append({'x': float(cx), 'y': float(cy), 'color': name,
-                              'n': len(idx), 'dist': float(np.hypot(cx, cy)),
-                              'extent': extent, 'sector': _sector(arr)})
+    # one pillar half red, half green -> one detection, majority colour
+    reds = [f for f in found if f[0] == 'red']
+    for g in [f for f in found if f[0] == 'green']:
+        gc = g[1].mean(axis=0)
+        near = [r for r in reds if r[1] is not None
+                and np.hypot(*(r[1].mean(axis=0) - gc)) < MIXED_MERGE_DIST]
+        if not near:
+            continue
+        r = min(near, key=lambda r: np.hypot(*(r[1].mean(axis=0) - gc)))
+        both = np.vstack((r[1], g[1]))
+        win = r if len(r[1]) >= len(g[1]) else g
+        win[1], (g if win is r else r)[1] = both, None
+
+    obstacles = []
+    for name, arr in found:
+        if arr is None:
+            continue
+        extent = float(max(np.ptp(arr[:, 0]), np.ptp(arr[:, 1])))
+        cx, cy = arr[:, 0].mean(), arr[:, 1].mean()
+        d = np.hypot(cx, cy)
+        if d < 1e-6:
+            continue
+        # front face -> centre: push away from the sensor by half a width
+        cx += PILLAR_HALF_WIDTH * cx / d
+        cy += PILLAR_HALF_WIDTH * cy / d
+        obstacles.append({'x': float(cx), 'y': float(cy), 'color': name,
+                          'n': len(arr), 'dist': float(np.hypot(cx, cy)),
+                          'extent': extent, 'sector': _sector(arr)})
 
     return obstacles
 

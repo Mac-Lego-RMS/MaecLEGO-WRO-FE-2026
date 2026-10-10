@@ -769,7 +769,7 @@ class Round1Controller(Node):
         # wall, and it parked 8 cm too deep (5.7 cm from the outer wall,
         # against it). Both back to 0. only_parken_3: looked good, but very
         # close to the wall in the first two moves -> start 1.5 cm further back.
-        'park_offset_long_ccw':     ('park_offset_long_ccw',     0.010, float),   # comp_10 (24 cm bay): start 3 cm further ahead, was too close to the bay
+        'park_offset_long_ccw':     ('park_offset_long_ccw',     0.020, float),   # comp_20: rear wall touched (LiDAR: 3.5 cm front gap after the forward move) -> +1 cm
         'park_offset_lat_ccw':      ('park_offset_lat_ccw',      -0.04, float),
         # Only used when the front magenta wall is NOT seen (otherwise the
         # face sets the start along). With a seen face the start came out
