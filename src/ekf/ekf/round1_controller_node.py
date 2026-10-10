@@ -920,6 +920,13 @@ class Round1Controller(Node):
         # from the outer wall and touched it rear right. 0 = off.
         'park_split_frac':          ('park_split_frac',          0.70, float),
         'park_end_front_margin':    ('park_end_front_margin',    0.012, float),
+        # Safety move before every forward move in the bay: nearest LiDAR point
+        # within the car width ahead; at the front wall it reads ~0.152 (comp_11/
+        # 12/13 touching). Predicted after the move closer than
+        # park_front_contact + park_front_margin -> straight back by the deficit
+        # first (the arc stays as it is). 0 margin = off.
+        'park_front_contact':       ('park_front_contact',       0.152, float),
+        'park_front_margin':        ('park_front_margin',        0.025, float),
         'park_skip_empty_moves':    ('park_skip_empty_moves',    1.0, lambda v: bool(float(v))),
         'debug':         ('debug',         1.0,   lambda v: bool(float(v))),
     }
@@ -3251,6 +3258,8 @@ class Round1Controller(Node):
                     self.unpark_steps_run[self.unpark_index] = (steer, cm)
                     if self._park_end_guard(self.unpark_index, steer, cm, theta):
                         return                       # straight move inserted: steer anew
+                    if self._park_front_safety(self.unpark_index, steer, cm):
+                        return                       # safety move inserted: steer anew
                 deg = cm_to_deg(cm)
                 self.unpark_move_done = None
                 self.unpark_sent_t = t_now
@@ -3645,6 +3654,7 @@ class Round1Controller(Node):
         self.park_end_guard_done = False
         self.park_trim_done = False
         self.park_trim_t0 = None
+        self.park_front_done = set()
         self.unpark_pos_prev = None       # shaft has turned during the laps
         self.approach_iter = 0
         if d > self.park_drive_from and not self.park_loc_uncertain:
@@ -3940,6 +3950,7 @@ class Round1Controller(Node):
         self.park_end_guard_done = False
         self.park_trim_done = False
         self.park_trim_t0 = None
+        self.park_front_done = set()
         self.unpark_pos_prev = None
         self.approach_iter = 0
         self.rev_attempts = 0
@@ -4810,6 +4821,11 @@ class Round1Controller(Node):
             if not hasattr(self, 'front_gaps'):
                 self.front_gaps = collections.deque(maxlen=20)
             self.front_gaps.append((self.now_s(), float(np.percentile(bx[sel], 20))))
+        wide = (np.abs(by) < CAR_WIDTH / 2.0 + 0.01) & (bx > 0.10) & (bx < 0.50)
+        if np.count_nonzero(wide) >= 2:
+            if not hasattr(self, 'front_near'):
+                self.front_near = collections.deque(maxlen=20)
+            self.front_near.append((self.now_s(), float(np.min(bx[wide]))))
 
     def _park_end_guard(self, k, steer, cm, theta):
         """Before the LAST reverse move of the park sequence: measure the gap
@@ -4870,6 +4886,36 @@ class Round1Controller(Node):
                 g_now * 100, math.degrees(th0), ge * 100, target * 100, abs(excess) * 100,
                 'too deep' if excess > 0 else 'too far forward', (target + 0.5 * free) * 100,
                 shift, k + 1))
+        return True
+
+    def _park_front_safety(self, k, steer, cm):
+        """Forward move in the bay: would the nose reach the front magenta
+        wall? Then insert a straight reverse move by the deficit first."""
+        if self.park_front_margin <= 0.0 or cm < 0.5 or k in getattr(self, 'park_inserted', set()):
+            return False
+        done = getattr(self, 'park_front_done', set())
+        if k in done:
+            return False
+        now = self.now_s()
+        near = [v for (t, v) in getattr(self, 'front_near', []) if now - t < 0.6]
+        if len(near) < 3:
+            return False
+        n_now = float(np.median(near))
+        dx, _dy, _dth = trajectory((0.0, 0.0, 0.0), [(steer, cm)])[-1][0]
+        after = n_now - dx
+        deficit = self.park_front_contact + self.park_front_margin - after
+        if deficit < 0.003:
+            return False
+        back = -min(deficit * 100.0, 6.0)
+        run = self.unpark_steps_run
+        run.insert(k, (_unpark_module.STEER_CENTER, back))
+        self.park_inserted = {i + 1 if i >= k else i for i in getattr(self, 'park_inserted', set())} | {k}
+        self.park_front_done = {i + 1 if i >= k else i for i in done} | {k + 1}
+        self.unpark_steer_sent = False
+        self.get_logger().warn(
+            "Parking safety move: nearest point ahead %.1f cm, forward move %d (%.1f cm) would "
+            "end at %.1f cm (front wall at %.1f cm) -- first straight %+.1f cm." % (
+                n_now * 100, k + 1, cm, after * 100, self.park_front_contact * 100, back, ))
         return True
 
     def _park_final_trim(self, theta):
