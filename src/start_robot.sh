@@ -149,7 +149,7 @@ CAM_FPS=15.0
 # differently each time (edge R/G 1.56 vs 1.75). STARTING values for the
 # IMX219 -- calibrate at the field. Doubles written as doubles (ROS types).
 CSI_EXPOSURE_MS=20.0
-CSI_GAIN=8.0
+CSI_GAIN=3.5   # hall (comp_4_cam: gain 8 -> mat V 250, half saturated); lab: 8.0
 CSI_WBMODE=0
 CSI_SATURATION=1.0
 # 07.10.2026: white balance on the field mat inside the camera node, after the
