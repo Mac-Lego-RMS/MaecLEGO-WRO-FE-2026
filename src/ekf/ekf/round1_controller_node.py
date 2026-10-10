@@ -914,6 +914,11 @@ class Round1Controller(Node):
         'park_gap_bias':            ('park_gap_bias',            0.0265, float),
         'park_end_guard_max_cm':    ('park_end_guard_max_cm',    6.0, float),
         'park_end_guard_tol':       ('park_end_guard_tol',       0.010, float),
+        # First long reverse arc of the park sequence in two parts: this share,
+        # then the rest from the gyro heading so it ends on the planned heading.
+        # comp_8/9 (CW): the arc turned 17-22 deg too far, the car ended 5 cm
+        # from the outer wall and touched it rear right. 0 = off.
+        'park_split_frac':          ('park_split_frac',          0.70, float),
         'park_end_front_margin':    ('park_end_front_margin',    0.012, float),
         'park_skip_empty_moves':    ('park_skip_empty_moves',    1.0, lambda v: bool(float(v))),
         'debug':         ('debug',         1.0,   lambda v: bool(float(v))),
@@ -3238,8 +3243,11 @@ class Round1Controller(Node):
                 if t_now - self.unpark_t0 < self.unpark_steer_wait_s:
                     return
                 if self.unpark_mode == 'in':
-                    cm = self._park_correct_arc(self.unpark_index, steer, cm,
-                                                x, y, theta)
+                    if self.unpark_index == getattr(self, 'park_split_rem_index', None):
+                        cm = self._park_split_remainder(cm, theta)
+                    else:
+                        cm = self._park_correct_arc(self.unpark_index, steer, cm,
+                                                    x, y, theta)
                     self.unpark_steps_run[self.unpark_index] = (steer, cm)
                     if self._park_end_guard(self.unpark_index, steer, cm, theta):
                         return                       # straight move inserted: steer anew
@@ -3821,11 +3829,39 @@ class Round1Controller(Node):
         """Heading at the start and at the end of park move k according to the
         unpark trajectory. Park move k drives unpark move j = n-1-k in
         reverse: it starts where that one ended and ends where that one began."""
+        ins = getattr(self, 'park_inserted', set())
+        if k in ins:
+            return None                          # inserted move: own logic
+        k = k - sum(1 for i in ins if i < k)     # index in park_in_steps
         n = len(self.park_in_steps)
         if len(self.unpark_trajectory) != n + 1 or not (0 <= k < n):
             return None
         j = n - 1 - k
         return self.unpark_trajectory[j + 1][2], self.unpark_trajectory[j][2]
+
+    def _park_split_remainder(self, cm, theta):
+        """Second part of the split arc: as long as it needs to reach the
+        planned end heading of the whole arc (gyro), 0 if already there."""
+        ins = self.park_inserted
+        self.park_inserted = set()
+        tgt = self._park_target_headings(self.park_split_orig)
+        self.park_inserted = ins
+        if tgt is None:
+            return cm
+        th_start, th_end = tgt
+        rest_plan = (1.0 - self.park_split_frac) * wrap(th_end - th_start)
+        needed = wrap(th_end - theta)
+        if abs(rest_plan) < 1e-3:
+            return cm
+        f = max(0.0, min(2.0, needed / rest_plan))
+        new = cm * f
+        self.get_logger().info(
+            "Parking split: after part 1 heading %+.1f deg, arc should end at %+.1f deg "
+            "-> rest %.1f instead of %.1f cm." % (
+                math.degrees(theta - self.park_origin[2]) if self.park_origin else math.degrees(theta),
+                math.degrees(th_end - self.park_origin[2]) if self.park_origin else math.degrees(th_end),
+                abs(new), abs(cm)))
+        return new if abs(new) >= 0.3 else 0.0
 
     def _park_sensors_sufficient(self, x, y):
         """Correct only as long as the pose holds: localisation 'ok' and the
@@ -4124,6 +4160,8 @@ class Round1Controller(Node):
         self._led_effect('left', 8.0, 700)
         self._led_effect('right', 8.0, 700)
         if getattr(self, 'park_corr_applied', False):
+            self.park_inserted = set()
+            self.park_split_rem_index = None
             self._park_start_moves(list(self.park_in_steps), 'in')   # already corrected
             return
         self.park_corr_applied = True
@@ -4151,7 +4189,22 @@ class Round1Controller(Node):
             self._park_reference_from_sequence(seq)
         self.get_logger().info(
             "Parking: %d moves from the reversed unpark sequence." % len(seq))
-        self._park_start_moves(list(seq), 'in')
+        run = list(seq)
+        self.park_inserted = set()
+        self.park_split_rem_index = None
+        frac = self.park_split_frac
+        if 0.0 < frac < 1.0:
+            for j, (st, c) in enumerate(run):
+                if abs(st) >= 50.0 and c <= -15.0:
+                    run[j:j + 1] = [(st, c * frac), (st, c * (1.0 - frac))]
+                    self.park_inserted = {j + 1}
+                    self.park_split_rem_index = j + 1
+                    self.park_split_orig = j
+                    self.get_logger().info(
+                        "Parking: move %d split %.1f + %.1f cm -- the rest from the gyro heading."
+                        % (j + 1, abs(c * frac), abs(c * (1.0 - frac))))
+                    break
+        self._park_start_moves(run, 'in')
 
     def _park_lateral_compensation(self, seq):
         """Sideways error at the start pose -> lengthen/shorten the first
@@ -4808,6 +4861,7 @@ class Round1Controller(Node):
                     ge * 100, target * 100, max(room, 0.0)))
             return False
         run.insert(k, (_unpark_module.STEER_CENTER, shift))
+        self.park_inserted = {i + 1 if i >= k else i for i in getattr(self, 'park_inserted', set())} | {k}
         self.unpark_steer_sent = False
         self.get_logger().warn(
             "Parking end guard: front wall %.1f cm ahead at %+.1f deg -> as planned the end gap "
