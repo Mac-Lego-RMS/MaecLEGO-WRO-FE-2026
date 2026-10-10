@@ -311,6 +311,19 @@ class Round1Controller(Node):
         # parken_test_23: 15 cm over 65 cm = 0.23 would have been enough, it
         # backed up anyway.
         'first_corner_backup_slope': ('first_corner_backup_slope', 0.50, float),
+        # Corner 1 right after unparking, pylon ahead of the bay to be passed
+        # on the OUTER side (CCW red, CW green): the unpark sequence ends
+        # turned far inward (CCW outer with the extra move +67 deg, comp_19;
+        # comp_17 +52 deg) and the nose points at the pylon -- the arc ran
+        # nearly straight past its corner, 1.5 cm. Swing back first with the
+        # opposite lock (forward ESP position move) to first_corner_swing_deg
+        # to the straight; the arc then starts on the outer side of the pylon.
+        # 0 = off. Length = excess heading x first_corner_swing_r (measured:
+        # 12 cm full lock -> +28.3 deg, 4 cm -> +13.3 deg).
+        'first_corner_swing_deg':    ('first_corner_swing_deg',    25.0, float),
+        'first_corner_swing_min':    ('first_corner_swing_min',    10.0, float),
+        'first_corner_swing_r':      ('first_corner_swing_r',      0.24, float),
+        'first_corner_swing_max_cm': ('first_corner_swing_max_cm', 20.0, float),
         # Turn in earlier by the dead time: the command only takes effect
         # after steer_dead_time, the steering law already uses the pose of
         # then. Switching exactly at T_A, that pose lay 9 cm on the straight
@@ -4570,6 +4583,8 @@ class Round1Controller(Node):
         self.button_pressed = True
         if self._first_corner_back_up():
             return
+        if self._first_corner_swing():
+            return
         self.state = 'WAIT_INPUTS'
         self.get_logger().info("On to the race. Waiting for inputs...")
 
@@ -4735,6 +4750,68 @@ class Round1Controller(Node):
             mirror_steps([(0.0, command * 100.0)], self.unpark_direction == 'CCW'), 'back')
         return True
 
+    def _first_corner_swing(self):
+        """See parameter first_corner_swing_deg. True = move is running."""
+        if (self.first_corner_swing_deg <= 0.0 or self.pose is None or self.walls is None
+                or not self.geometry_ready() or self.unpark_direction not in ('CW', 'CCW')):
+            return False
+        pyl = self._unpark_pylon_from_bay()
+        outer = OBST_RED if self.unpark_direction == 'CCW' else OBST_GREEN
+        if pyl is None or pyl['color'] != outer:
+            return False
+        x, y, th = self.pose
+        idx = self.pick_first_corner(x, y, th)
+        if idx is None:
+            return False
+        tx, ty = self._travel_dir(idx)
+        if (pyl['x'] - x) * tx + (pyl['y'] - y) * ty < 0.0:
+            return False                                 # already beside it
+        s = 1.0 if self.unpark_direction == 'CCW' else -1.0
+        rel = s * wrap(th - math.atan2(ty, tx))          # + = turned inward
+        excess = rel - math.radians(self.first_corner_swing_deg)
+        if excess < math.radians(self.first_corner_swing_min):
+            return False
+        cm = min(excess * self.first_corner_swing_r * 100.0, self.first_corner_swing_max_cm)
+        steps = mirror_steps([(-100.0, cm)], self.unpark_direction == 'CCW')
+        # Way clear? Pylons, and the outer wall: no car corner closer to it
+        # than at the start or than the magenta walls reach (+2 cm).
+        nx, ny, dw = self.walls[self._entry_wall_idx(idx)]
+        hb = 0.5 * CAR_WIDTH
+        corners = ((CAR_REAR, hb), (CAR_REAR, -hb), (CAR_NOSE, hb), (CAR_NOSE, -hb))
+
+        def wall_min(p):
+            c, sn = math.cos(p[2]), math.sin(p[2])
+            return min(nx * (p[0] + c * lx - sn * ly) + ny * (p[1] + sn * lx + c * ly) - dw
+                       for lx, ly in corners)
+        path = [q for q, _k in trajectory((x, y, th), steps)]
+        w_lim = min(wall_min(path[0]), BAY_DEPTH + 0.02) - 0.005
+        for q in path:
+            if wall_min(q) < w_lim:
+                self.get_logger().warn(
+                    "Corner 1: swing back from %+.0f deg not possible -- the car would "
+                    "come within %.1f cm of the outer wall."
+                    % (math.degrees(rel), wall_min(q) * 100))
+                return False
+            for o in (self.obstacles or []):
+                gap = self._outline_dist(q, o['x'], o['y']) - BLOCK_HALF
+                if gap < 0.03:
+                    self.get_logger().warn(
+                        "Corner 1: swing back from %+.0f deg not possible -- pylon #%d "
+                        "in the way (%.1f cm)." % (math.degrees(rel), o['id'], gap * 100))
+                    return False
+        self.get_logger().info(
+            "Corner 1: pylon #%d %s ahead is passed on the outer side, the car stands "
+            "%+.0f deg to the straight -- swings back %.1f cm forward with the opposite "
+            "lock to about %.0f deg (the arc would run along the pylon otherwise)."
+            % (pyl['id'], 'red' if outer == OBST_RED else 'green', math.degrees(rel), cm,
+               self.first_corner_swing_deg))
+        self.unpark_pos_prev = None
+        # the unpark sequence stays the template for parking
+        self.unpark_steps_before_backup = list(self.unpark_steps_run)
+        self._unpark_pid(self.unpark_pid)
+        self._park_start_moves(steps, 'back')
+        return True
+
     def _first_corner_backup_done(self, x, y, theta):
         self.unpark_steps_run = self.unpark_steps_before_backup
         self.unpark_pos_prev = None
@@ -4744,7 +4821,7 @@ class Round1Controller(Node):
         self.corner_idx = None
         self.state = 'WAIT_INPUTS'
         self.get_logger().info(
-            "Backed up: pose (%.2f, %.2f), heading %+.1f deg. On to the race."
+            "Corner 1 move done: pose (%.2f, %.2f), heading %+.1f deg. On to the race."
             % (x, y, math.degrees(theta)))
 
     # ------------------------------------------ Emergency manoeuvring
