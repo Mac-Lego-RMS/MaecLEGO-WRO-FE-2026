@@ -926,6 +926,17 @@ class Round1Controller(Node):
         'park_end_guard':           ('park_end_guard',           0.0, lambda v: bool(float(v))),   # off for now (user, comp_17)
         'park_gap_bias':            ('park_gap_bias',            0.050, float),   # comp_11/12: trim to 20.6 cm touched the front wall -> centre ~23 cm
         'park_end_guard_max_cm':    ('park_end_guard_max_cm',    6.0, float),
+        # End of the park sequence: heading to the straight (EKF/gyro, the
+        # same value as in the PARKED report) off by more than park_heading_tol
+        # deg -> full-lock pair forward/back of equal length, turns without
+        # net travel along the bay. comp_20 ended +9 deg, comp_21 (with a
+        # fixed pair in the table) -14.5 deg -- the end heading scatters too
+        # much for a fixed move. park_heading_degcm: measured 2.9 deg per cm
+        # and move (comp_21: 2+2 cm -> -12.3 deg). 0 = off.
+        'park_heading_tol':         ('park_heading_tol',         3.0, float),
+        'park_heading_degcm':       ('park_heading_degcm',       2.9, float),
+        'park_heading_max_cm':      ('park_heading_max_cm',      3.0, float),
+        'park_heading_rounds':      ('park_heading_rounds',      2, int),
         'park_end_guard_tol':       ('park_end_guard_tol',       0.015, float),
         # First long reverse arc of the park sequence in two parts: this share,
         # then the rest from the gyro heading so it ends on the planned heading.
@@ -3235,6 +3246,8 @@ class Round1Controller(Node):
         if self.state == 'UNPARK_DRIVE':
             if self.unpark_index >= len(self.unpark_steps_run):
                 if self.unpark_mode == 'in':
+                    if self._park_heading_trim(x, y, theta):
+                        return                       # waiting, or a turning pair was appended
                     if self._park_final_trim(x, y, theta):
                         return                       # waiting, or a trim move was appended
                     self._park_done(x, y, theta)
@@ -3681,6 +3694,8 @@ class Round1Controller(Node):
         self.park_end_guard_done = False
         self.park_trim_done = False
         self.park_trim_t0 = None
+        self.park_htrim_t0 = None
+        self.park_htrim_n = 0
         self.park_front_done = set()
         self.unpark_pos_prev = None       # shaft has turned during the laps
         self.approach_iter = 0
@@ -3977,6 +3992,8 @@ class Round1Controller(Node):
         self.park_end_guard_done = False
         self.park_trim_done = False
         self.park_trim_t0 = None
+        self.park_htrim_t0 = None
+        self.park_htrim_n = 0
         self.park_front_done = set()
         self.unpark_pos_prev = None
         self.approach_iter = 0
@@ -5000,6 +5017,42 @@ class Round1Controller(Node):
         self._park_insert_straight(k, -min(excess / max(math.cos(th0), 0.5), 0.06) * 100.0,
             "Parking safety move: forward move %d would end %.1f cm ahead of the start pose (limit %.1f)"
             % (k + 1, a_after * 100, self.park_front_slack * 100))
+        return True
+
+    def _park_heading_trim(self, x, y, theta):
+        """See park_heading_tol. True = waiting, or moves were appended."""
+        if (self.park_heading_tol <= 0.0 or self.park_heading_degcm <= 0.0
+                or getattr(self, 'park_htrim_n', 0) >= self.park_heading_rounds):
+            return False
+        now = self.now_s()
+        if getattr(self, 'park_htrim_t0', None) is None:
+            self.park_htrim_t0 = now
+            return True
+        if now - self.park_htrim_t0 < 0.5:
+            return True                              # let the pose settle
+        self.park_htrim_t0 = None
+        self.park_htrim_n = getattr(self, 'park_htrim_n', 0) + 1
+        try:
+            _nx, _ny, _dw, tx, ty = self._park_straight()
+        except Exception:
+            return False
+        err = math.degrees(wrap(theta - math.atan2(ty, tx)))
+        if abs(err) <= self.park_heading_tol:
+            self.get_logger().info("Parking: heading %+.1f deg to the straight -- straight enough."
+                                   % err)
+            self.park_htrim_n = self.park_heading_rounds
+            return False
+        cm = min(abs(err) / (2.0 * self.park_heading_degcm), self.park_heading_max_cm)
+        # forward with right lock / back with left lock turns clockwise (-)
+        lock = 100.0 if err < 0.0 else -100.0
+        self.unpark_steps_run.append((steer_to_wire(lock), cm))
+        self.unpark_steps_run.append((steer_to_wire(-lock), -cm))
+        self.unpark_phase = 'steer'
+        self.unpark_steer_sent = False
+        self.get_logger().warn(
+            "Parking: heading %+.1f deg to the straight -- full-lock pair %.1f cm forward "
+            "/ %.1f cm back to turn it straight (round %d)."
+            % (err, cm, cm, self.park_htrim_n))
         return True
 
     def _park_final_trim(self, x, y, theta):
