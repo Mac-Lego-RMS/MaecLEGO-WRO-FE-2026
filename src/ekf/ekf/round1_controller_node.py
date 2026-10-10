@@ -720,7 +720,7 @@ class Round1Controller(Node):
         # wall, park start 2-4 cm too far back, only_parken_85/87).
         # park_offset_long_* does NOT apply then. 0 = off.
         # cam_34-36: start 2 cm too far ahead of the bay every time -> 0.090 -> 0.070
-        'park_face_dist_cw':        ('park_face_dist_cw',        0.060, float),   # cam_62-66: 2 cm back hit the rear, 1 cm
+        'park_face_dist_cw':        ('park_face_dist_cw',        0.065, float),   # 0: too far ahead (cam_62-65), -2 cm: rear hit (cam_66), -1 cm: too far back (comp_2)
         'park_face_dist_ccw':       ('park_face_dist_ccw',       0.0, float),
         # CCW re-measured 04.10. (only_parken_1-4: 31.3-33.3 long, 14.2-16.8
         # lat) -- they matter now that the outer sequence is the default
@@ -764,7 +764,7 @@ class Round1Controller(Node):
         # cam_13 the face window passed during the last corner (4 scans), the
         # map start with -0.025 applied -> ~2.2 cm too far back. -> -0.003.
         # cam_34-36: 2 cm closer to the bay, like park_face_dist_cw
-        'park_offset_long_cw':      ('park_offset_long_cw',      -0.033, float),   # cam_64-66: 2 cm back hit the rear, 1 cm
+        'park_offset_long_cw':      ('park_offset_long_cw',      -0.028, float),   # see park_face_dist_cw: 0.5 cm back from the original
         'park_offset_lat_cw':       ('park_offset_lat_cw',       0.01, float),
         # --- /localization_state -------------------------------------------
         # With 'recovering'/'lost' at most this fast (curvature stays the same).
@@ -838,7 +838,10 @@ class Round1Controller(Node):
         # second one then stands further on). If the first pylon stands in
         # the middle or at the end, there is nothing behind it -- no halt.
         # 0 = always halt (as before).
-        'scan_lookahead_smart':     ('scan_lookahead_smart',     1.0, lambda v: bool(float(v))),
+        # comp_2: off -- mandatory halt in the middle of every straight in lap 1.
+        # Red pylons read green from 0.9-1.5 m, the colour was "known" from
+        # there, the halt was skipped and #16/#10/#5 were passed on the wrong side.
+        'scan_lookahead_smart':     ('scan_lookahead_smart',     0.0, lambda v: bool(float(v))),
         # a pylon at least this far from the front wall counts as ENTRY row
         # (rows: entry ~2.0 m, middle ~1.5 m, end ~1.0 m)
         'scan_lookahead_entry_front': ('scan_lookahead_entry_front', 1.75, float),
