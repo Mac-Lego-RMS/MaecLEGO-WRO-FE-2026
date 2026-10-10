@@ -926,7 +926,7 @@ class Round1Controller(Node):
         # park_front_contact + park_front_margin -> straight back by the deficit
         # first (the arc stays as it is). 0 margin = off.
         'park_front_contact':       ('park_front_contact',       0.152, float),
-        'park_front_margin':        ('park_front_margin',        0.025, float),
+        'park_front_margin':        ('park_front_margin',        0.0, float),   # off: in the 24 cm bay backing up hit the rear wall (comp_17)
         # Short straight correction moves (end guard, safety move, trim) roll
         # on: comp_15/16 trim 1.3 -> 4.3 cm, safety 4.1 -> 4.7 cm over the
         # ground. They are commanded with this factor.
