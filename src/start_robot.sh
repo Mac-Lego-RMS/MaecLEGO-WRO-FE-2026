@@ -152,6 +152,14 @@ CSI_EXPOSURE_MS=20.0
 CSI_GAIN=8.0
 CSI_WBMODE=0
 CSI_SATURATION=1.0
+# 07.10.2026: white balance on the field mat inside the camera node, after the
+# shading map and before the chroma boost. With wbmode=0 the colours still ran
+# off over ~2 h of camera uptime (12:44 -> 14:58 the image went yellow: mat
+# B/G 0.70, magenta parking walls read red, green pylons olive; run cam_13
+# crashed). A restart brought it back -- this follows it continuously instead.
+# Median over 15 degree sectors of the bright mat ring, slow and limited.
+CSI_MAT_WB=true
+CSI_MAT_WB_GAIN_MAX=1.8
 
 # Exposure of the fisheye camera. exposure_time_absolute counts in 100 us
 # steps, so 500 is 50 ms. Must fit under the frame period, otherwise
@@ -669,7 +677,7 @@ if [ "$CAMERA_ON" -eq 1 ] && [ "$CAMERA" = "csi" ]; then
 # no v4l2-ctl and no USB watchdog needed. The node restarts its pipeline on
 # errors by itself.
 run_window 3 camera \
-    "ros2 run camera_lidar_fusion csi_camera --ros-args -p width:=$CAM_WIDTH -p height:=$CAM_HEIGHT -p framerate:=$CAM_FPS -p exposure_ms:=$CSI_EXPOSURE_MS -p gain:=$CSI_GAIN -p wbmode:=$CSI_WBMODE -p saturation:=$CSI_SATURATION"
+    "ros2 run camera_lidar_fusion csi_camera --ros-args -p width:=$CAM_WIDTH -p height:=$CAM_HEIGHT -p framerate:=$CAM_FPS -p exposure_ms:=$CSI_EXPOSURE_MS -p gain:=$CSI_GAIN -p wbmode:=$CSI_WBMODE -p saturation:=$CSI_SATURATION -p mat_wb:=$CSI_MAT_WB -p mat_wb_gain_max:=$CSI_MAT_WB_GAIN_MAX"
 echo "Camera: CSI (Argus), exposure $CSI_EXPOSURE_MS ms, gain $CSI_GAIN, wbmode $CSI_WBMODE."
 if grep -q "Samples, 2026-09" "$WORKSPACE/config/fisheye_calib.yaml" 2>/dev/null; then
     echo "NOTE: config/fisheye_calib.yaml is still from the old USB camera -- calibrate"
