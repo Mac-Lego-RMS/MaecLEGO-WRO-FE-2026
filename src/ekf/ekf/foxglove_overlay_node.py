@@ -74,7 +74,7 @@ MAX_RANGE = 4.0
 # is a parameter -- it only changes how the pillar looks, never the geometry.
 PILLAR_EDGE = 0.044
 
-ROBOT_LENGTH = 0.175
+ROBOT_LENGTH = 0.160
 ROBOT_WIDTH = 0.110
 ROBOT_NOSE_PAST_LIDAR = 0.03    # nose 3 cm ahead of the lidar
 
@@ -331,7 +331,7 @@ class FoxgloveOverlay(Node):
         # corner square, CW 0.8 m before it. The rear wall follows after
         # bay_gap. Only drawn if the start is closer than bay_detect_dist to
         # the outer wall -- i.e. out of the bay.
-        self.bay_gap = self.declare_parameter('bay_gap', 0.2625).value
+        self.bay_gap = self.declare_parameter('bay_gap', 0.24).value
         self.bay_depth = self.declare_parameter('bay_depth', 0.20).value
         self.bay_thick = self.declare_parameter('bay_wall_thickness', 0.02).value
         self.bay_height = self.declare_parameter('bay_wall_height', 0.10).value

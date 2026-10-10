@@ -43,14 +43,15 @@ import numpy as np
 
 # --- Car -----------------------------------------------------------------
 # base_link sits on the REAR AXLE. The rear overhang is therefore only
-# 3.5 cm, which limits the tail swing when turning in to 1.7 mm.
+# 2.0 cm (3.5 cm before the tail was shortened in Oct 2026: 17.5 -> 16 cm),
+# which keeps the tail swing when turning in tiny.
 CAR_WIDTH = 0.110
-CAR_LENGTH = 0.175
+CAR_LENGTH = 0.160
 CAR_NOSE = 0.140                      # nose_offset from round1_controller_node
-CAR_REAR = CAR_NOSE - CAR_LENGTH        # = -0.035
+CAR_REAR = CAR_NOSE - CAR_LENGTH        # = -0.020
 
 # --- Bay -----------------------------------------------------------------
-BAY_LENGTH = 1.5 * CAR_LENGTH      # 0.2625 m, given by the rules
+BAY_LENGTH = 1.5 * CAR_LENGTH      # 0.24 m, given by the rules (1.5 x car length)
 BAY_DEPTH = 0.200                 # how far the magenta walls reach into the field
 # Thickness of the magenta walls. It matters, even though it is small: the
 # walls are BARS, not solid walls. As soon as the robot is past one, it is

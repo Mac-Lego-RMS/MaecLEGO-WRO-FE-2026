@@ -552,7 +552,7 @@ class Round1Controller(Node):
         'finish_tol':    ('finish_tol',    0.04,  float),   # stop tolerance on front_dist
         # --- Unparking from the start bay -----------------------------------
         # The two magenta walls stand perpendicular on the outer wall and
-        # reach 20 cm into the field; the bay is the 26.25 cm wide gap between
+        # reach 20 cm into the field; the bay is the 24 cm wide gap (26.25 before Oct 2026) between
         # them. The robot stands lengthwise in it and has to get out sideways.
         # All the maths is in ekf/unpark.py, here only the switches.
         # unpark, unpark_only and unpark_invert_direction are REAL bool
