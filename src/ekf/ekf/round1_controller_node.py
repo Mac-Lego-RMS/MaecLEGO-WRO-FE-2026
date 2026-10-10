@@ -910,7 +910,7 @@ class Round1Controller(Node):
         # the prediction hit the real end gap within 1 cm -- comp_3/5 would
         # have been seen hitting the rear wall. park_gap_bias: LiDAR reads the
         # wall ~2.7 cm further than the geometry (cam_66 at the rear wall).
-        'park_end_guard':           ('park_end_guard',           1.0, lambda v: bool(float(v))),
+        'park_end_guard':           ('park_end_guard',           0.0, lambda v: bool(float(v))),   # off for now (user, comp_17)
         'park_gap_bias':            ('park_gap_bias',            0.050, float),   # comp_11/12: trim to 20.6 cm touched the front wall -> centre ~23 cm
         'park_end_guard_max_cm':    ('park_end_guard_max_cm',    6.0, float),
         'park_end_guard_tol':       ('park_end_guard_tol',       0.015, float),
