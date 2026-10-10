@@ -931,6 +931,13 @@ class Round1Controller(Node):
         # on: comp_15/16 trim 1.3 -> 4.3 cm, safety 4.1 -> 4.7 cm over the
         # ground. They are commanded with this factor.
         'park_corr_move_gain':      ('park_corr_move_gain',      0.70, float),
+        # Pose based end position: target along the bay axis relative to the
+        # start pose in the bay (0 = exactly where it started), and how far the
+        # car may get ahead of / behind that pose in the bay.
+        'park_end_offset':          ('park_end_offset',          0.0, float),
+        'park_front_slack':         ('park_front_slack',         0.025, float),
+        'park_rear_slack':          ('park_rear_slack',          0.025, float),
+        'park_pose_sane':           ('park_pose_sane',           0.06, float),
         'park_skip_empty_moves':    ('park_skip_empty_moves',    1.0, lambda v: bool(float(v))),
         'debug':         ('debug',         1.0,   lambda v: bool(float(v))),
     }
@@ -3215,7 +3222,7 @@ class Round1Controller(Node):
         if self.state == 'UNPARK_DRIVE':
             if self.unpark_index >= len(self.unpark_steps_run):
                 if self.unpark_mode == 'in':
-                    if self._park_final_trim(theta):
+                    if self._park_final_trim(x, y, theta):
                         return                       # waiting, or a trim move was appended
                     self._park_done(x, y, theta)
                 elif self.unpark_mode == 'approach':
@@ -3263,9 +3270,9 @@ class Round1Controller(Node):
                         cm = self._park_correct_arc(self.unpark_index, steer, cm,
                                                     x, y, theta)
                     self.unpark_steps_run[self.unpark_index] = (steer, cm)
-                    if self._park_end_guard(self.unpark_index, steer, cm, theta):
+                    if self._park_end_guard(self.unpark_index, steer, cm, x, y, theta):
                         return                       # straight move inserted: steer anew
-                    if self._park_front_safety(self.unpark_index, steer, cm, theta):
+                    if self._park_front_safety(self.unpark_index, steer, cm, x, y, theta):
                         return                       # safety move inserted: steer anew
                 deg = cm_to_deg(cm)
                 self.unpark_move_done = None
@@ -4834,14 +4841,36 @@ class Round1Controller(Node):
                 self.front_near = collections.deque(maxlen=20)
             self.front_near.append((self.now_s(), float(np.min(bx[wide]))))
 
-    def _park_end_guard(self, k, steer, cm, theta):
-        """Before the LAST reverse move of the park sequence: measure the gap
-        to the front magenta wall, predict the end gap with the drive model
-        and, if the car would end more than park_end_guard_tol off the bay
-        centre, insert a STRAIGHT move before this one that shifts it by the
-        difference. The arcs stay as they are, so the end heading does too
-        (shortening the last full-lock arc instead turned it 10-14 deg).
-        Returns True if a move was inserted (steer anew)."""
+    def _park_along(self, x, y, theta):
+        """Pose relative to the bay: (along the bay axis from the start pose in
+        the bay, heading relative to it). The start pose (park_origin) is where
+        the car stood before unparking -- that is where it should end."""
+        ox, oy, oth = self.park_origin
+        a = (x - ox) * math.cos(oth) + (y - oy) * math.sin(oth)
+        return a, wrap(theta - oth)
+
+    def _park_pose_sane(self, a, what):
+        """The pose in the bay can be off (comp_15: +10.7 cm ahead of the start
+        pose in a bay with 8 cm play). Implausible -> no correction."""
+        if abs(a) <= self.park_pose_sane:
+            return True
+        self.get_logger().warn("%s: pose %.1f cm along the start pose is implausible (> %.1f) -- no correction."
+                               % (what, a * 100, self.park_pose_sane * 100))
+        return False
+
+    def _park_insert_straight(self, k, cm, why):
+        run = self.unpark_steps_run
+        run.insert(k, (_unpark_module.STEER_CENTER, cm * self.park_corr_move_gain))
+        self.park_inserted = {i + 1 if i >= k else i for i in getattr(self, 'park_inserted', set())} | {k}
+        self.unpark_steer_sent = False
+        self.get_logger().warn("%s -- straight %+.1f cm (commanded %+.1f) before move %d." % (
+            why, cm, cm * self.park_corr_move_gain, k + 1))
+
+    def _park_end_guard(self, k, steer, cm, x, y, theta):
+        """Before the LAST reverse move: where does the car end along the bay
+        axis (pose + remaining moves, drive model) compared to its start pose
+        in the bay? Off by more than park_end_guard_tol -> a straight move
+        first. Pose based -- the LiDAR cannot measure the magenta wall that close."""
         if (not self.park_end_guard or self.park_origin is None or cm > -0.5
                 or getattr(self, 'park_end_guard_done', False)):
             return False
@@ -4849,93 +4878,57 @@ class Round1Controller(Node):
         if any(run[j][1] <= -0.5 for j in range(k + 1, len(run))):
             return False                               # not the last reverse move
         self.park_end_guard_done = True
-        now = self.now_s()
-        g = [v for (t, v) in getattr(self, 'front_gaps', []) if now - t < 0.6]
-        if len(g) < 3:
-            self.get_logger().warn(
-                "Parking end guard: front magenta wall not seen (%d scans) -- moves as planned."
-                % len(g))
+        a_now, th0 = self._park_along(x, y, theta)
+        if not self._park_pose_sane(a_now, 'Parking end guard'):
             return False
-        g_now = float(np.median(g))
-        th0 = wrap(theta - self.park_origin[2])
-        dx, dy, dth = trajectory((0.0, 0.0, 0.0), list(run[k:]))[-1][0]
-        the = th0 + dth
-        along = dx * math.cos(th0) - dy * math.sin(th0)
-        ge = (g_now * math.cos(th0) - along) / max(math.cos(the), 0.5)
-        free = BAY_LENGTH - (CAR_NOSE - CAR_REAR)
-        target = CAR_NOSE + 0.5 * free + self.park_gap_bias
-        excess = ge - target                           # > 0: ends too deep
-        if abs(excess) < self.park_end_guard_tol:
+        dx, dy, _dth = trajectory((0.0, 0.0, 0.0), list(run[k:]))[-1][0]
+        a_end = a_now + dx * math.cos(th0) - dy * math.sin(th0)
+        err = self.park_end_offset - a_end            # > 0: ends too far back -> forward
+        if abs(err) < self.park_end_guard_tol:
             self.get_logger().info(
-                "Parking end guard: front wall %.1f cm ahead at %+.1f deg -> end gap %.1f cm "
-                "(centre %.1f cm) -- fits." % (g_now * 100, math.degrees(th0), ge * 100, target * 100))
+                "Parking end guard: pose %.1f cm along the start pose, ends at %.1f cm (target %.1f) -- fits."
+                % (a_now * 100, a_end * 100, self.park_end_offset * 100))
             return False
-        shift = max(-self.park_end_guard_max_cm, min(self.park_end_guard_max_cm,
-                    excess * 100.0 / max(math.cos(th0), 0.5)))
-        # forward only as far as there is room in front of the nose (comp_5:
-        # 4 cm left before the last move) -- the rest is trimmed at the end
-        room = (g_now - CAR_NOSE - self.park_gap_bias - self.park_end_front_margin) * 100.0
-        if shift > 0.0:
-            shift = min(shift, max(room, 0.0))
-        if abs(shift) < 0.5:
-            self.get_logger().warn(
-                "Parking end guard: end gap would be %.1f cm (centre %.1f cm), but only "
-                "%.1f cm room in front of the nose -- trims at the end." % (
-                    ge * 100, target * 100, max(room, 0.0)))
+        c = max(math.cos(th0), 0.5)
+        shift = err / c
+        # never further ahead/back than the slack around the start pose
+        hi = (self.park_front_slack - a_now) / c
+        lo = (-self.park_rear_slack - a_now) / c
+        shift = max(lo, min(hi, shift, self.park_end_guard_max_cm / 100.0))
+        shift = max(shift, -self.park_end_guard_max_cm / 100.0)
+        if abs(shift) < 0.005:
             return False
-        run.insert(k, (_unpark_module.STEER_CENTER, shift * self.park_corr_move_gain))
-        self.park_inserted = {i + 1 if i >= k else i for i in getattr(self, 'park_inserted', set())} | {k}
-        self.unpark_steer_sent = False
-        self.get_logger().warn(
-            "Parking end guard: front wall %.1f cm ahead at %+.1f deg -> as planned the end gap "
-            "would be %.1f cm (centre %.1f cm, %.1f cm %s; rear wall at %.1f cm) -- inserts a straight "
-            "move of %+.1f cm before move %d." % (
-                g_now * 100, math.degrees(th0), ge * 100, target * 100, abs(excess) * 100,
-                'too deep' if excess > 0 else 'too far forward', (target + 0.5 * free) * 100,
-                shift, k + 1))
+        self._park_insert_straight(k, shift * 100.0,
+            "Parking end guard: pose %.1f cm along the start pose, would end at %.1f cm (target %.1f)"
+            % (a_now * 100, a_end * 100, self.park_end_offset * 100))
         return True
 
-    def _park_front_safety(self, k, steer, cm, theta):
-        """Forward move in the bay: would the nose reach the front magenta
-        wall? Then insert a straight reverse move by the deficit first."""
-        if self.park_front_margin <= 0.0 or cm < 0.5 or k in getattr(self, 'park_inserted', set()):
+    def _park_front_safety(self, k, steer, cm, x, y, theta):
+        """Forward move in the bay: would base_link end more than
+        park_front_slack ahead of the start pose (nose at the front wall)?
+        Then straight back by the excess first. Pose based."""
+        if self.park_front_margin <= 0.0 or self.park_origin is None or cm < 0.5:
             return False
-        done = getattr(self, 'park_front_done', set())
-        if k in done:
+        if k in getattr(self, 'park_inserted', set()) or k in getattr(self, 'park_front_done', set()):
             return False
-        # Only nearly straight in the bay: angled (comp_17: -28 deg before the
-        # forward arc) the nearest point ahead is not where the nose will hit,
-        # the safety move then backed it into the rear wall from a good pose.
-        if self.park_origin is not None and abs(math.degrees(wrap(theta - self.park_origin[2]))) > 15.0:
+        a_now, th0 = self._park_along(x, y, theta)
+        if not self._park_pose_sane(a_now, 'Parking safety move'):
             return False
-        now = self.now_s()
-        near = [v for (t, v) in getattr(self, 'front_near', []) if now - t < 0.6]
-        if len(near) < 3:
+        dx, dy, _dth = trajectory((0.0, 0.0, 0.0), [(steer, cm)])[-1][0]
+        a_after = a_now + dx * math.cos(th0) - dy * math.sin(th0)
+        excess = a_after - self.park_front_slack
+        if excess < 0.003:
             return False
-        n_now = float(np.median(near))
-        dx, _dy, _dth = trajectory((0.0, 0.0, 0.0), [(steer, cm)])[-1][0]
-        after = n_now - dx
-        deficit = self.park_front_contact + self.park_front_margin - after
-        if deficit < 0.003:
-            return False
-        back = -min(deficit * 100.0, 6.0)
-        run = self.unpark_steps_run
-        run.insert(k, (_unpark_module.STEER_CENTER, back * self.park_corr_move_gain))
-        self.park_inserted = {i + 1 if i >= k else i for i in getattr(self, 'park_inserted', set())} | {k}
-        self.park_front_done = {i + 1 if i >= k else i for i in done} | {k + 1}
-        self.unpark_steer_sent = False
-        self.get_logger().warn(
-            "Parking safety move: nearest point ahead %.1f cm, forward move %d (%.1f cm) would "
-            "end at %.1f cm (front wall at %.1f cm) -- first straight %+.1f cm." % (
-                n_now * 100, k + 1, cm, after * 100, self.park_front_contact * 100, back, ))
+        self.park_front_done = {i + 1 if i >= k else i for i in getattr(self, 'park_front_done', set())} | {k + 1}
+        self._park_insert_straight(k, -min(excess / max(math.cos(th0), 0.5), 0.06) * 100.0,
+            "Parking safety move: forward move %d would end %.1f cm ahead of the start pose (limit %.1f)"
+            % (k + 1, a_after * 100, self.park_front_slack * 100))
         return True
 
-    def _park_final_trim(self, theta):
-        """End of the park sequence: standing, measure the gap to the front
-        magenta wall and, if the car is more than park_end_guard_tol off the
-        bay centre, append one straight move to centre it. Returns True while
-        it waits for fresh scans or after appending the move."""
-        if not self.park_end_guard or getattr(self, 'park_trim_done', False):
+    def _park_final_trim(self, x, y, theta):
+        """End of the park sequence: straight to the start pose along the bay
+        axis if off by more than park_end_guard_tol. Pose based."""
+        if not self.park_end_guard or self.park_origin is None or getattr(self, 'park_trim_done', False):
             return False
         now = self.now_s()
         t0 = getattr(self, 'park_trim_t0', None)
@@ -4943,29 +4936,26 @@ class Round1Controller(Node):
             self.park_trim_t0 = now
             return True
         if now - t0 < 0.5:
-            return True                              # let the car settle, collect scans
+            return True                              # let the pose settle
         self.park_trim_done = True
-        g = [v for (t, v) in getattr(self, 'front_gaps', []) if t > t0 + 0.1]
-        th = wrap(theta - self.park_origin[2]) if self.park_origin is not None else 0.0
-        if len(g) < 3 or abs(math.degrees(th)) > 8.0:
-            self.get_logger().warn(
-                "Parking trim: front wall in %d scans, heading %+.1f deg -- no trim." % (len(g), math.degrees(th)))
+        a_now, th = self._park_along(x, y, theta)
+        if not self._park_pose_sane(a_now, 'Parking trim'):
             return False
-        g_now = float(np.median(g))
-        free = BAY_LENGTH - (CAR_NOSE - CAR_REAR)
-        target = CAR_NOSE + 0.5 * free + self.park_gap_bias
-        err = (g_now - target) * math.cos(th)          # > 0: too deep -> forward
+        if abs(math.degrees(th)) > 8.0:
+            self.get_logger().warn("Parking trim: heading %+.1f deg -- no trim." % math.degrees(th))
+            return False
+        err = self.park_end_offset - a_now
         if abs(err) < self.park_end_guard_tol:
-            self.get_logger().info(
-                "Parking trim: front wall %.1f cm ahead (centre %.1f cm) -- centred." % (g_now * 100, target * 100))
+            self.get_logger().info("Parking trim: pose %.1f cm along the start pose (target %.1f) -- fits."
+                                   % (a_now * 100, self.park_end_offset * 100))
             return False
-        cm = max(-self.park_end_guard_max_cm, min(self.park_end_guard_max_cm, err * 100.0))
+        cm = err / max(math.cos(th), 0.5) * 100.0
+        cm = max(-self.park_end_guard_max_cm, min(self.park_end_guard_max_cm, cm))
         self.unpark_steps_run.append((_unpark_module.STEER_CENTER, cm * self.park_corr_move_gain))
         self.unpark_phase = 'steer'
         self.unpark_steer_sent = False
-        self.get_logger().warn(
-            "Parking trim: front wall %.1f cm ahead, centre would be %.1f cm -- straight %+.1f cm." % (
-                g_now * 100, target * 100, cm))
+        self.get_logger().warn("Parking trim: pose %.1f cm along the start pose (target %.1f) -- straight %+.1f cm (commanded %+.1f)."
+                               % (a_now * 100, self.park_end_offset * 100, cm, cm * self.park_corr_move_gain))
         return True
 
     def trigger_scan_cb(self, msg):
