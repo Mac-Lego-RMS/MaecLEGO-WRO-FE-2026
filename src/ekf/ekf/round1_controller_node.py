@@ -778,7 +778,7 @@ class Round1Controller(Node):
         # map start with -0.025 applied -> ~2.2 cm too far back. -> -0.003.
         # cam_34-36: 2 cm closer to the bay, like park_face_dist_cw
         'park_offset_long_cw':      ('park_offset_long_cw',      0.027, float),   # +1.5 cm with park_face_dist_cw (comp_14);   # see park_face_dist_cw: +4 cm (comp_2/3)
-        'park_offset_lat_cw':       ('park_offset_lat_cw',       -0.02, float),   # comp_25: parked 14.3 cm from the outer wall, ~3 cm further out than CCW
+        'park_offset_lat_cw':       ('park_offset_lat_cw',       -0.005, float),  # comp_25: 14.3 cm from the outer wall -> -0.02; comp_26: 7.5 cm (askew start) -> half back
         # --- /localization_state -------------------------------------------
         # With 'recovering'/'lost' at most this fast (curvature stays the same).
         'v_loc_uncertain':          ('v_loc_uncertain',          0.20, float),
@@ -937,6 +937,12 @@ class Round1Controller(Node):
         'park_heading_degcm':       ('park_heading_degcm',       2.9, float),
         'park_heading_max_cm':      ('park_heading_max_cm',      3.0, float),
         'park_heading_rounds':      ('park_heading_rounds',      2, int),
+        # The same at the START pose, before the park moves: the closed-loop
+        # reverse approach ends askew every time (comp_25 -7.3, comp_26 -7.9
+        # deg) -- the first arc then starts pre-rotated, comes out too short
+        # or (with the lateral compensation) too deep. Full-lock pair if the
+        # heading is off by more than this, then remeasure. 0 = off.
+        'park_start_heading_tol':   ('park_start_heading_tol',   2.5, float),
         'park_end_guard_tol':       ('park_end_guard_tol',       0.015, float),
         # First long reverse arc of the park sequence in two parts: this share,
         # then the rest from the gyro heading so it ends on the planned heading.
@@ -3699,6 +3705,7 @@ class Round1Controller(Node):
         self.park_front_done = set()
         self.unpark_pos_prev = None       # shaft has turned during the laps
         self.approach_iter = 0
+        self.park_hfix_n = 0
         if d > self.park_drive_from and not self.park_loc_uncertain:
             # Mandatory hold is over: from here on the pylons may be passed
             # on either side. Replan the path for that.
@@ -3765,6 +3772,20 @@ class Round1Controller(Node):
             return
         d, lat_off, heading = self._park_pose_error(*self._park_mean_pose())
         self.park_avg_poses = []
+        if (self.park_start_heading_tol > 0.0 and self.park_heading_degcm > 0.0
+                and abs(math.degrees(heading)) > self.park_start_heading_tol
+                and getattr(self, 'park_hfix_n', 0) < self.park_heading_rounds):
+            self.park_hfix_n = getattr(self, 'park_hfix_n', 0) + 1
+            err = math.degrees(heading)
+            cm = min(abs(err) / (2.0 * self.park_heading_degcm), self.park_heading_max_cm)
+            lock = 100.0 if err < 0.0 else -100.0       # see _park_heading_trim
+            self.get_logger().warn(
+                "Parking: heading %+.1f deg at the start pose -- full-lock pair %.1f cm "
+                "forward / %.1f cm back to turn it straight first (round %d)."
+                % (err, cm, cm, self.park_hfix_n))
+            self._park_start_moves([(steer_to_wire(lock), cm), (steer_to_wire(-lock), -cm)],
+                                   'approach')
+            return
         # The first full-lock arc brings the heading error back in over its
         # length -- that shifts the whole arc along the line (run 34: -6.3
         # deg -> 2.7 cm shorter -> nose in the bay wall). The start pose
