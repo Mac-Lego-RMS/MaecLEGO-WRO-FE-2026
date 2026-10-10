@@ -720,7 +720,7 @@ class Round1Controller(Node):
         # wall, park start 2-4 cm too far back, only_parken_85/87).
         # park_offset_long_* does NOT apply then. 0 = off.
         # cam_34-36: start 2 cm too far ahead of the bay every time -> 0.090 -> 0.070
-        'park_face_dist_cw':        ('park_face_dist_cw',        0.105, float),   # comp_2/3 (24 cm bay, moves now ~100 %): +4 cm, was rear wall
+        'park_face_dist_cw':        ('park_face_dist_cw',        0.120, float),   # comp_14: first arc too far back -> +1.5 cm;   # comp_2/3 (24 cm bay, moves now ~100 %): +4 cm, was rear wall
         'park_face_dist_ccw':       ('park_face_dist_ccw',       0.0, float),
         # CCW re-measured 04.10. (only_parken_1-4: 31.3-33.3 long, 14.2-16.8
         # lat) -- they matter now that the outer sequence is the default
@@ -764,7 +764,7 @@ class Round1Controller(Node):
         # cam_13 the face window passed during the last corner (4 scans), the
         # map start with -0.025 applied -> ~2.2 cm too far back. -> -0.003.
         # cam_34-36: 2 cm closer to the bay, like park_face_dist_cw
-        'park_offset_long_cw':      ('park_offset_long_cw',      0.012, float),   # see park_face_dist_cw: +4 cm (comp_2/3)
+        'park_offset_long_cw':      ('park_offset_long_cw',      0.027, float),   # +1.5 cm with park_face_dist_cw (comp_14);   # see park_face_dist_cw: +4 cm (comp_2/3)
         'park_offset_lat_cw':       ('park_offset_lat_cw',       0.01, float),
         # --- /localization_state -------------------------------------------
         # With 'recovering'/'lost' at most this fast (curvature stays the same).
@@ -3252,6 +3252,9 @@ class Round1Controller(Node):
                 if self.unpark_mode == 'in':
                     if self.unpark_index == getattr(self, 'park_split_rem_index', None):
                         cm = self._park_split_remainder(cm, theta)
+                    elif self.unpark_index == getattr(self, 'park_split_orig', None)                             and getattr(self, 'park_split_rem_index', None) is not None:
+                        pass   # part 1 as planned: the rest corrects the heading (comp_14:
+                               # both lengthened -> too far back already in the first arc)
                     else:
                         cm = self._park_correct_arc(self.unpark_index, steer, cm,
                                                     x, y, theta)
@@ -3863,7 +3866,7 @@ class Round1Controller(Node):
         needed = wrap(th_end - theta)
         if abs(rest_plan) < 1e-3:
             return cm
-        f = max(0.0, min(2.0, needed / rest_plan))
+        f = max(0.0, min(1.0, needed / rest_plan))   # never longer than planned (comp_14)
         new = cm * f
         self.get_logger().info(
             "Parking split: after part 1 heading %+.1f deg, arc should end at %+.1f deg "
