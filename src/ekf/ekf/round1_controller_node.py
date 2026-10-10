@@ -913,7 +913,7 @@ class Round1Controller(Node):
         'park_end_guard':           ('park_end_guard',           1.0, lambda v: bool(float(v))),
         'park_gap_bias':            ('park_gap_bias',            0.050, float),   # comp_11/12: trim to 20.6 cm touched the front wall -> centre ~23 cm
         'park_end_guard_max_cm':    ('park_end_guard_max_cm',    6.0, float),
-        'park_end_guard_tol':       ('park_end_guard_tol',       0.010, float),
+        'park_end_guard_tol':       ('park_end_guard_tol',       0.015, float),
         # First long reverse arc of the park sequence in two parts: this share,
         # then the rest from the gyro heading so it ends on the planned heading.
         # comp_8/9 (CW): the arc turned 17-22 deg too far, the car ended 5 cm
@@ -927,6 +927,10 @@ class Round1Controller(Node):
         # first (the arc stays as it is). 0 margin = off.
         'park_front_contact':       ('park_front_contact',       0.152, float),
         'park_front_margin':        ('park_front_margin',        0.025, float),
+        # Short straight correction moves (end guard, safety move, trim) roll
+        # on: comp_15/16 trim 1.3 -> 4.3 cm, safety 4.1 -> 4.7 cm over the
+        # ground. They are commanded with this factor.
+        'park_corr_move_gain':      ('park_corr_move_gain',      0.70, float),
         'park_skip_empty_moves':    ('park_skip_empty_moves',    1.0, lambda v: bool(float(v))),
         'debug':         ('debug',         1.0,   lambda v: bool(float(v))),
     }
@@ -4879,7 +4883,7 @@ class Round1Controller(Node):
                 "%.1f cm room in front of the nose -- trims at the end." % (
                     ge * 100, target * 100, max(room, 0.0)))
             return False
-        run.insert(k, (_unpark_module.STEER_CENTER, shift))
+        run.insert(k, (_unpark_module.STEER_CENTER, shift * self.park_corr_move_gain))
         self.park_inserted = {i + 1 if i >= k else i for i in getattr(self, 'park_inserted', set())} | {k}
         self.unpark_steer_sent = False
         self.get_logger().warn(
@@ -4911,7 +4915,7 @@ class Round1Controller(Node):
             return False
         back = -min(deficit * 100.0, 6.0)
         run = self.unpark_steps_run
-        run.insert(k, (_unpark_module.STEER_CENTER, back))
+        run.insert(k, (_unpark_module.STEER_CENTER, back * self.park_corr_move_gain))
         self.park_inserted = {i + 1 if i >= k else i for i in getattr(self, 'park_inserted', set())} | {k}
         self.park_front_done = {i + 1 if i >= k else i for i in done} | {k + 1}
         self.unpark_steer_sent = False
@@ -4951,7 +4955,7 @@ class Round1Controller(Node):
                 "Parking trim: front wall %.1f cm ahead (centre %.1f cm) -- centred." % (g_now * 100, target * 100))
             return False
         cm = max(-self.park_end_guard_max_cm, min(self.park_end_guard_max_cm, err * 100.0))
-        self.unpark_steps_run.append((_unpark_module.STEER_CENTER, cm))
+        self.unpark_steps_run.append((_unpark_module.STEER_CENTER, cm * self.park_corr_move_gain))
         self.unpark_phase = 'steer'
         self.unpark_steer_sent = False
         self.get_logger().warn(
