@@ -1,134 +1,70 @@
-"""Hardware-free tests for serialisation and parsing of the ESP bridge."""
+"""Hardware-free tests of the protocol between the Jetson and the ESP32-S3.
 
-from esp_bridge.esp_serial_bridge import (
-    CMD_BATTERY_WARN,
-    CMD_BUTTON,
-    CMD_MOVE_DONE,
-    EspProtocol,
-    EV_PACKET,
-    EV_TEXT,
-    PacketParser,
-    decode_battery,
-    decode_move_done,
-    decode_pid_rsp,
-    decode_progress,
-)
+Both modules carry their own self-test, which encodes every command and
+decodes every answer against the byte layout of the firmware:
 
+    python3 esp_serial_bridge.py --selftest
+    python3 timesync_jetson.py --selftest
 
-# --- Serialisation: the *1000 encoding is the main source of errors ----------
+These tests run both self-tests and check the payload decoders with packets
+built byte by byte, so they also run with pytest on a laptop without ROS:
+the one ROS message the bridge imports at module level is replaced by a
+stand-in when ROS is not installed.
 
-def test_pid_set_float_x1000():
-    # Kp = 4.5 -> 4500 as int32 big-endian
-    assert EspProtocol.pid_set(0, 4.5) == bytes([0xA5, 0x80, 0x00, 0x00, 0x00, 0x11, 0x94])
+    cd src/esp_bridge && python3 -m pytest test -q
+"""
+import struct
+import sys
+import types
 
+try:
+    import nav_msgs.msg  # noqa: F401
+except ImportError:                                   # no ROS on this computer
+    nav_msgs = types.ModuleType('nav_msgs')
+    nav_msgs.msg = types.ModuleType('nav_msgs.msg')
+    nav_msgs.msg.Odometry = object
+    sys.modules['nav_msgs'] = nav_msgs
+    sys.modules['nav_msgs.msg'] = nav_msgs.msg
 
-def test_pid_set_integer_param_still_x1000():
-    # maxDuty = 700 MUST be encoded as 700000, not as 700.
-    pkt = EspProtocol.pid_set(4, 700)
-    assert pkt[:3] == bytes([0xA5, 0x80, 0x04])
-    assert int.from_bytes(pkt[3:], 'big') == 700000
-
-
-def test_pid_set_timeout_large_value():
-    # Timeout 15 s -> 15000000
-    pkt = EspProtocol.pid_set(7, 15000.0)  # ms as a real value
-    assert int.from_bytes(pkt[3:], 'big', signed=True) == 15000000
+from esp_bridge import esp_serial_bridge as bridge    # noqa: E402
+from esp_bridge import timesync_jetson                # noqa: E402
 
 
-def test_motor_big_endian_speed():
-    assert EspProtocol.motor(0, 1023) == bytes([0xA5, 0x10, 0x00, 0x03, 0xFF])
-    assert EspProtocol.motor(1, 0) == bytes([0xA5, 0x10, 0x01, 0x00, 0x00])
+def test_bridge_selftest():
+    assert bridge._selftest() == 0
 
 
-def test_motor_speed_clamped():
-    assert EspProtocol.motor(0, 5000) == bytes([0xA5, 0x10, 0x00, 0x03, 0xFF])
+def test_timesync_selftest():
+    assert timesync_jetson._selftest() == 0
 
 
-def test_servo_negative_two_complement():
-    # -100 as int16 big-endian = 0xFF9C
-    assert EspProtocol.servo(1, -100) == bytes([0xA5, 0x20, 0x01, 0xFF, 0x9C])
-    assert EspProtocol.servo(1, 100) == bytes([0xA5, 0x20, 0x01, 0x00, 0x64])
+def test_telemetry_signed_and_scaled():
+    # position and speed in 1/10 degree, duty signed, current in mA
+    t = bridge.parse_telemetry(struct.pack('>iihh', 36000, -1800, -512, 250))
+    assert t.position_deg == 3600.0
+    assert t.speed_deg_s == -180.0
+    assert t.duty == -512
+    assert abs(t.current_a - 0.25) < 1e-9
+    assert abs(t.speed_rad_s + 3.14159265) < 1e-6
 
 
-def test_move_negative_target():
-    # -45.0 deg -> -450 in 1/10 deg
-    pkt = EspProtocol.move(7, -450)
-    assert pkt[:3] == bytes([0xA5, 0x90, 0x07])
-    assert int.from_bytes(pkt[3:], 'big', signed=True) == -450
+def test_battery_in_millivolts():
+    b = bridge.parse_battery(struct.pack('>ih', 15930, 3983), warning=True)
+    assert abs(b.pack_v - 15.93) < 1e-9
+    assert abs(b.cell_v - 3.983) < 1e-9
+    assert b.warning is True
 
 
-def test_zero_payload_commands():
-    assert EspProtocol.emergency() == bytes([0xA5, 0xFF])
-    assert EspProtocol.pid_save() == bytes([0xA5, 0x83])
-    assert EspProtocol.calibrate() == bytes([0xA5, 0x40])
+def test_move_done_status():
+    done = bridge.parse_move_done(bytes([7, bridge.MOVE_OK]) + struct.pack('>i', -450))
+    assert done.move_id == 7 and done.ok
+    assert done.position_deg == -45.0
+    late = bridge.parse_move_done(bytes([8, bridge.MOVE_TIMEOUT]) + struct.pack('>i', 0))
+    assert not late.ok
+    assert bridge.MOVE_STATUS_TEXT[late.status] == 'timeout'
 
 
-# --- Parser ------------------------------------------------------------------
-
-def test_parse_button():
-    events = PacketParser().feed(bytes([0xA5, CMD_BUTTON, 0x01]))
-    assert events == [(EV_PACKET, CMD_BUTTON, bytes([0x01]))]
-
-
-def test_parse_move_done_roundtrip():
-    payload = bytes([0x07, 0x00]) + (905).to_bytes(4, 'big', signed=True)
-    events = PacketParser().feed(bytes([0xA5, CMD_MOVE_DONE]) + payload)
-    assert len(events) == 1
-    _, cmd, pl = events[0]
-    assert cmd == CMD_MOVE_DONE
-    assert decode_move_done(pl) == (7, 0, 905)
-
-
-def test_parse_battery():
-    payload = (15200).to_bytes(4, 'big', signed=True) + (3800).to_bytes(2, 'big', signed=True)
-    events = PacketParser().feed(bytes([0xA5, CMD_BATTERY_WARN]) + payload)
-    assert decode_battery(events[0][2]) == (15200, 3800)
-
-
-def test_ascii_text_between_packets():
-    stream = b'System Ready. v1.0\n' + bytes([0xA5, CMD_BUTTON, 0x01])
-    events = PacketParser().feed(stream)
-    assert (EV_TEXT, 'System Ready. v1.0') in events
-    assert (EV_PACKET, CMD_BUTTON, bytes([0x01])) in events
-
-
-def test_unknown_cmd_resyncs():
-    # 0x99 is unknown -> drop it, then detect the valid button packet.
-    stream = bytes([0xA5, 0x99, 0x12, 0xA5, CMD_BUTTON, 0x01])
-    events = PacketParser().feed(stream)
-    packets = [e for e in events if e[0] == EV_PACKET]
-    assert packets == [(EV_PACKET, CMD_BUTTON, bytes([0x01]))]
-
-
-def test_split_packet_across_feeds():
-    parser = PacketParser()
-    assert parser.feed(bytes([0xA5, CMD_MOVE_DONE, 0x07])) == []
-    rest = bytes([0x00]) + (100).to_bytes(4, 'big', signed=True)
-    events = parser.feed(rest)
-    assert len(events) == 1
-    assert decode_move_done(events[0][2]) == (7, 0, 100)
-
-
-def test_pid_rsp_decode():
-    payload = (4250).to_bytes(4, 'big', signed=True) \
-        + (300).to_bytes(4, 'big', signed=True) \
-        + (80).to_bytes(4, 'big', signed=True)
-    kp, ki, kd = decode_pid_rsp(payload)
-    assert (round(kp, 3), round(ki, 3), round(kd, 3)) == (4.25, 0.3, 0.08)
-
-
-def test_progress_decode():
-    payload = bytes([0x07, 0x01, 0x32]) \
-        + (450).to_bytes(4, 'big', signed=True) \
-        + (900).to_bytes(4, 'big', signed=True)
-    events = PacketParser().feed(bytes([0xA5, 0x94]) + payload)
-    assert decode_progress(events[0][2]) == (7, 1, 50, 450, 900)
-
-
-def test_stale_partial_packet_is_dropped():
-    parser = PacketParser(timeout=0.1)
-    # Partial packet at t=0
-    parser.feed(bytes([0xA5, CMD_MOVE_DONE, 0x07]), now=0.0)
-    # New, complete button frame much later -> old partial packet dropped
-    events = parser.feed(bytes([0xA5, CMD_BUTTON, 0x01]), now=1.0)
-    assert events == [(EV_PACKET, CMD_BUTTON, bytes([0x01]))]
+def test_progress():
+    p = bridge.parse_progress(bytes([3, 1, 40]) + struct.pack('>ii', 900, 1800))
+    assert (p.move_id, p.active, p.percent) == (3, True, 40)
+    assert (p.position_deg, p.target_deg) == (90.0, 180.0)

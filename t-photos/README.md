@@ -9,3 +9,5 @@ Team MäcLEGO: Clemens, Jannik and Finn.
 | Clemens | mechanical design: chassis, steering, drive train, tyres, body |
 | Jannik | electronics and main PCB, parts of the software |
 | Finn | software: estimation, perception, planning and control |
+
+![MäcLego on Tour](team_photo_funny.JPG)

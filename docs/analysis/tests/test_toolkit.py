@@ -260,7 +260,8 @@ def test_colour_distance(env):
 def test_steer_lut_parking_manual(env):
     out = env['out'] / 'fig'
     r = plot_steer_lut.run(['--out-dir', str(out)])
-    assert sorted(r['speeds']) == [0.35, 0.5, 0.75]
+    calib = json.loads((HERE.parents[2] / 'src/esp_bridge/esp_bridge/steer_calib.json').read_text())
+    assert len(r['speeds']) == len(calib['speeds']) >= 2
     assert all(v['right']['full_lock_deg'] < -20 for v in r['speeds'].values())
     figs_exist(out, 'steer_lut')
     csv = env['out'] / 'runs_pk.csv'

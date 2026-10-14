@@ -54,7 +54,7 @@ Most of the software described in chapter 3 is a reaction to one of these rows.
 | Drive gear vibration → IMU | pitch noise grew with speed up to 3.4 °/s; the cause was an adapter running out of true (chapter 2) | the adapter was fixed (−86 % pitch noise at 0.2 m/s); the EKF uses only yaw, which stayed below 0.1 °/s |
 | Motor current sense → safety | the current signal stays in the ADC's dead zone (chapter 2) | wall contact is detected with the LiDAR instead (4 cm in front of the nose) |
 | ESP move overshoot → parking | position moves overshoot ~1.1 cm forwards but only 0.4 cm backwards | forward parking moves are 1.5 cm shorter |
-| ESP position moves → reliability | a move that does not reach its target within 4 s aborts the run: 10 of 37 failed runs | open, see Risks |
+| ESP position moves → reliability | a move that does not reach its target within 4 s aborts the run: 19 of 69 failed runs | open, see Risks |
 | Start pose in the bay → whole run | the map origin is the pose in the bay; parking returns to it | estimation restarted before every run; the robot must not be moved after it |
 | Jetson module → chassis | the module (69.6 mm long) and its carrier board set the length of the chassis | motor lengthways in the strip beside the module, battery above it ([chapter 1](02-mobility.md#layout-in-four-levels)) |
 | Rigid rear axle → steering and software | the rear wheels scrub in tight corners; the driven full lock is 22–25° instead of the static 37° | measured steering table per speed; planner keeps every arc at R ≥ 0.30 m ([chapter 1](02-mobility.md#steering-angle-while-driving)) |
@@ -93,6 +93,7 @@ Most of the software described in chapter 3 is a reaction to one of these rows.
 | Only the newest scan (queue depth 1) | process every scan | a late wall correction pulls the heading back in a corner | corrections were 0.35–0.6 s late, 30–50° heading in a 90°/s corner |
 | Colour per LiDAR point (fusion) | YOLOv11n on the camera image (national final) | lower latency; distance and colour in one measurement; camera and LiDAR use the same 240°, so a pixel exists for every LiDAR point | the old set-up no longer exists, so no direct latency comparison; field of view: 3 vs. 6 of 6 seats at the scan halt, 3 vs. 5 within the colour range (fov_coverage) |
 | Fisheye camera (240° used horizontally) | 120° CSI camera | sees the next straight before the corner | 3 vs. 6 of 6 seats at the scan halt, 3 vs. 5 within the colour range |
+| IMX219-200 fisheye on the CSI port (since October) | PiCam360 on USB (used until October), another USB fisheye | the USB camera dropped out and re-enumerated, and finally the PiCam360 failed; its USB plug and cable took a lot of space in the stack; its MJPEG stream had to be decoded by the CPU | 62 of 66 full obstacle runs parked within 2 cm; green read as red in at most 2 % of the points instead of 25 % at 1.4 m ([chapter 3](04-software.md#colour)) |
 | RPLIDAR S3 | STL-19P (used first), LakiBeam 1S | resolution, scan rate and range on the black walls; the LakiBeam is too large and needs Ethernet and a 12 V supply | comparison table in [chapter 2](03-power-sensors.md#lidar-selection) |
 | Colour limit 1.60 m | colour at any distance | beyond ~1.7 m red is read as green | test with a red pillar: 10/0 red/green votes at 1.2–1.6 m, 2/8 at 1.6–2.0 m, 0/16 beyond; pooled over 59 bags green is read as red for 25 % of its points at 1.4 m |
 | See-through clearing of seats | keep every seat once occupied | phantom pillars caused unnecessary lane changes | replayed on the failed bags with phantom pillars: removed them there |
@@ -134,9 +135,9 @@ complete versions. The table compares them subsystem by subsystem.
 | Drive | Pololu 20D 31:1 on a LEGO differential, no encoder (before: Pololu 25:1) | 25GA370 with Hall encoder, lengthways, brass bevel gears 1:1, rigid axle | closed speed loop; motor with encoder had to fit ([chapter 1](02-mobility.md#motor-selection)) |
 | Wheels | LEGO Spike, 67 mm | cast silicone tyres on PA6-CF rims, 32 mm | grip, lower vehicle ([chapter 1](02-mobility.md#tires)) |
 | Electronics | Jetson developer kit; motor, servo and LiDAR drivers separate from the main PCB | Jetson module on the A603 carrier; main PCB V5 as a stack with power path, motor driver, servo interface and LiDAR bridge; no 12 V rail | size, cabling, protection ([chapter 2](03-power-sensors.md#design-evolution)) |
-| Sensors | STL-19P LiDAR (≈250° usable), 120° CSI camera, BNO055 | RPLIDAR S3 (240° used), fisheye camera above the LiDAR, BNO055, wheel encoder | scan rate and range on the black walls; see the next straight before the corner ([chapter 2](03-power-sensors.md#sensors-selection-and-placement)) |
+| Sensors | STL-19P LiDAR (≈250° usable), 120° CSI camera, BNO055 | RPLIDAR S3 (240° used), fisheye camera above the LiDAR (IMX219-200 on CSI since October), BNO055, wheel encoder | scan rate and range on the black walls; see the next straight before the corner ([chapter 2](03-power-sensors.md#sensors-selection-and-placement)) |
 | Software | LiDAR wall follower (PID), YOLOv11n, IMU turn counting | EKF on a map of the field, colour per LiDAR point, Stanley and arc control, state machines | a pose from every single scan failed on one bad scan; ties are broken by time ([chapter 3](04-software.md)) |
-| Result | full driving score, 29/30 documentation, 4th place on time | 71 recorded test runs: 17/22 races finished; parking 13/45 within 2 cm overall, 5/5 in runs 35–46 ([chapter 3](04-software.md#results-over-all-test-runs)) | the task is harder now: the German rules place exactly one pillar per straight and make parking an optional extra task without a parallel requirement; the international rules place up to two pillars per straight and require parallel parking after the three laps |
+| Result | full driving score, 29/30 documentation, 4th place on time | 293 recorded test runs: 17/22 obstacle races and 11/14 open-challenge runs finished; parking 13/45 within 2 cm in `parken_test`, 5/5 in runs 35–46; the full obstacle challenge with parking within 2 cm in 62 of 66 runs of the final `cam` series ([chapter 3](04-software.md#results-over-all-test-runs)) | the task is harder now: the German rules place exactly one pillar per straight and make parking an optional extra task without a parallel requirement; the international rules place up to two pillars per straight and require parallel parking after the three laps |
 
 ![The three vehicles of the season (photos not to scale): the LEGO hybrid at the regional final and before the national final (170 × 140 × 170 mm, 803 g), and Napoleon without its body (160 × 111 × 61 mm).](../figures/iterations_robots.jpg)
 
@@ -154,7 +155,7 @@ CAD history, those of the software from the commit history.
 | August | screws, wheels and materials in the digital twin (14 August) | motor, servo and LiDAR drivers on the main PCB (8 August) | EKF with wall correction (22–27 August), map matching (30 August) | |
 | 1–15 September | steel tie rod, servo rotated by 12° (8 September) | | steering calibration per speed, Stanley (6–7 September), obstacle detection (9 September) | reliable test runs from 8 September, recorded from 11 September |
 | 16–30 September | chassis named "Napoleon" (24 September), circle test drives (25 September) | | motion-compensated fusion and unparking (16 September), parking at the end of the run (22 September), model-based parking and CPU load 92 % → 53 % (28–29 September) | 71 recorded test runs (11–29 September) |
-| October | | | | 13–16 October: European Open, Zagreb |
+| October | | CSI camera IMX219-200 replaces the failed PiCam360 (5 October) | colour shading and thresholds for the CSI camera (6–7 October) | 220 recorded runs: open challenge (3 October), parking series (4–6 October), full obstacle challenge with the CSI camera, 62 of 66 within 2 cm (7–8 October); 13–16 October: European Open, Zagreb |
 
 ### Iteration cycles
 
@@ -168,11 +169,12 @@ The most important cycles across all subsystems:
 | Mechanics | C-profile knuckles cracked at the mounting holes | holes close to the outer wall | wall thickened (v54) |
 | Mechanics | front wheels slid out of their bearings | press fit only | retaining ring; no mechanical failure since |
 | Mechanics | once-per-revolution oscillation in the first circle drives | tyre moulds printed with an aligned seam | random seam, better rim centring; oscillation gone |
-| Mechanics | IMU pitch noise up to 3.4 °/s | gear on an improvised adapter | adapter repaired: −23 to −86 % pitch noise ([chapter 2](03-power-sensors.md#iteration-locating-and-removing-the-vibration-source)) |
+| Mechanics | IMU pitch noise up to 3.4 °/s | gear on an improvised adapter, then the adapter refitted tighter (−23 to −86 % pitch noise, but 4–20 % more friction) | a gear that fits the D-shaft directly: friction largely back, yaw noise −23 to −73 % ([chapter 2](03-power-sensors.md#iteration-locating-and-removing-the-vibration-source)) |
 | Electronics | the low-voltage warning would only fire at 3.21 V per cell | – | failed divider resistor found by comparing against the bench supply ([chapter 2](03-power-sensors.md#fault-found-and-fixed-the-divider-read-18--high)) |
 | Electronics | the 5 V protection reacted in seconds, with an undefined threshold | PTC and TVS diode (V3) | eFuse with defined limit and 6.1 V clamp (V5) |
 | Electronics | the eFuse limit (3.75 A) lay above the regulator's 3.5 A, so it could never act | first resistor value | limit lowered to 2.05 A, below the regulator and above the measured 5 V load of ≈0.7 A ([chapter 2](03-power-sensors.md#current-limit-corrected)) |
 | Electronics | a regulated 12 V motor rail on the board | 12 V rail for repeatable speed | rail removed: the encoder closes the speed loop |
+| Sensors | the camera dropped out during runs, and finally the PiCam360 failed | fixed device name via udev, watchdog that restarts the camera node | IMX219-200 on the CSI port with its own node; shading calibration against the colour cast at the image edge; colour thresholds re-tuned ([chapter 2](03-power-sensors.md#camera-swap-usb-to-csi)) |
 | Software | heading drift 25° | line fit per cluster | split at corners before the fit (±1.5°) |
 | Software | localisation lost after a blind stretch | gate from the EKF covariance | staged gate by scan count |
 | Software | pushed pillar matched to a wall end | overlap check removed (it blocked correct matches) | overlap check re-added with a tolerance that widens with the gate level |
@@ -187,13 +189,42 @@ The most important cycles across all subsystems:
 | Software | parking accuracy 6/8 → 2/7 | – | heading correction at the start pose (run 35), closed-loop reverse (run 38): 5/5, median 0.3 cm (chapter 3) |
 | Software | wrong unpark side with a green pillar in front | fixed pillar row | nearest pillar in front, filtered by its lateral position |
 
+### Example: replacing the camera
+
+The camera swap in October shows how one part touches every subsystem. The
+PiCam360 on USB had caused trouble for weeks: it dropped out and re-enumerated
+during runs, which needed a fixed device name and a watchdog, and its USB plug
+and cable took a lot of space in a stack that is otherwise built around every
+millimetre. When it failed, the replacement was chosen against all subsystems at
+once:
+
+- **Mechanics.** A CSI camera connects with a flat ribbon cable instead of a USB
+  plug, which frees the space the plug took in the stack.
+- **Electronics.** The Jetson's CSI port is otherwise unused; nothing on the main
+  PCB had to change.
+- **Software.** A new node publishes the image on the same topic as before, so
+  the fusion stayed unchanged. The image path runs in the Jetson's own hardware,
+  so the CPU no longer decodes MJPEG — CPU load was the tightest resource
+  (next example).
+- **Perception.** A new lens means new colours: the cast at the image edge was
+  measured with a white sheet over the lens and corrected, and the colour
+  thresholds were tuned again on recorded runs.
+
+The new camera was then tested in two series on 7 and 8 October: 18 runs with
+virtual pillars, to separate driving from perception, and 66 full obstacle runs
+with real pillars and the CSI camera. 62 of the 66 parked within 2 cm, and green
+pillars were read as red far less often than before (chapter 3).
+
 ### Example: the CPU load
 
 Every change was driven by a test or a recorded run. The CPU optimisation is a
 typical cycle: the load had crept up to 92 % over the test day, the fusion got
 only 2.8 camera images per second and paired scans with images 176 ms apart.
 After commit a14524e the same measurement gives 53 % load, 8.9 images per second
-and 23 ms between scan and image.
+and 23 ms between scan and image. The gain held: in the 220 runs since 3 October
+the mean CPU load per run was 31–45 % in the median of each series, including
+the full obstacle challenge with the CSI camera (45 %), whose image path no
+longer needs the CPU to decode.
 
 ![CPU load while driving over all runs, and run 48 (before) against run 49 (after).](../figures/cpu_before_after.png)
 
@@ -211,7 +242,7 @@ Only one run was recorded after the change; the temperature stayed uncritical
 
 | Failure mode | Effect | Detection | Mitigation |
 |---|---|---|---|
-| ESP position move does not reach its target | run aborted (10 of 37 failed runs, the most frequent cause) | move timeout 4 s, status in the acknowledgement | open: raise the minimum duty (90) or accept a small remaining travel; timeouts only appear from run 19 although the parameters are unchanged since run 9 |
+| ESP position move does not reach its target | run aborted (19 of 69 failed runs, still the most frequent cause; 8 in the 220 runs since 3 October) | move timeout 4 s, status in the acknowledgement | open: raise the minimum duty (90) or accept a small remaining travel; timeouts only appear from run 19 although the parameters are unchanged since run 9 |
 | Turn does not end | robot keeps turning at ~70° heading error (runs 20, 36) | – | open |
 | Colour misread while moving | pillar passed on the wrong side | – | colour only at standstill / low yaw rate, votes, 1.60 m limit |
 | Phantom pillar | unnecessary lane change, crash into the inner wall | LiDAR sees through the seat | seat cleared after 6 see-throughs |
@@ -225,8 +256,8 @@ Only one run was recorded after the change; the temperature stayed uncritical
 | EKF speed outlier (−1.93 to +2.16 m/s seen) | the bridge converts yaw rate to steering with the EKF speed: wrong angle, full lock when starting | – | corner command curvature-based; speed clamped to 0.2–1.2 m/s in the Stanley law; no filter in the bridge yet |
 | ESP keeps its last position target | after the next reset it drives back towards the old target | – | the controller sends motor 0 after parking |
 | Last park move against the wall | pushes until the ESP timeout (4 s), costs time | move acknowledgement with status | forward moves 1.5 cm shorter; per-move correction |
-| Battery voltage not measured | the reported value is a constant 17.518 V in all bags; a link between charge and failures cannot be checked | – | see chapter 2 |
-| Camera re-enumerates on USB | no colour | – | fixed device name via udev |
+| Battery voltage not measured | until 29 September the reported value was a constant 17.518 V in all 73 bags (failed divider resistor), so a link between charge and failures could not be checked | low-voltage warning at 3.8 V per cell | divider repaired; the 222 runs since 1 October report real values, median minimum 15.9 V ([chapter 2](03-power-sensors.md#battery-monitoring)) |
+| Camera re-enumerates on USB | no colour | – | fixed device name via udev and a camera watchdog; since October a CSI camera on a ribbon cable, which cannot drop off the bus |
 | ESP reboot / clock jump | wrong time stamps | time sync detects the reboot | resync |
 | Wall contact | robot pushes against the wall | LiDAR < 4 cm in front | stop, back up and re-plan; at most two manoeuvres per corner, then emergency stop |
 | Front wheel slides off its axle | wheel lost, run over | – | retaining ring; no such failure since it was added |
